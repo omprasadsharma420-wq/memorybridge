@@ -97,7 +97,8 @@ export async function readJsonLines<T>(
   try {
     raw = await readFile(path, 'utf8')
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { values: [], malformedLines: [] }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+      return { values: [], malformedLines: [] }
     throw error
   }
   const values: T[] = []

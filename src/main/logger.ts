@@ -38,7 +38,10 @@ export class SafeLogger {
   async write(event: LogEvent): Promise<void> {
     await ensureDirectory(dirname(this.path))
     const safe = Object.fromEntries(
-      Object.entries(event).map(([key, value]) => [key, typeof value === 'string' ? redactSecrets(value).slice(0, 200) : value])
+      Object.entries(event).map(([key, value]) => [
+        key,
+        typeof value === 'string' ? redactSecrets(value).slice(0, 200) : value
+      ])
     )
     await appendJsonLine(this.path, { timestamp: new Date().toISOString(), ...safe })
   }

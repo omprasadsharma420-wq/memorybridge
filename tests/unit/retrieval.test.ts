@@ -12,7 +12,13 @@ describe('hybrid retrieval ranking', () => {
   it('combines keyword, semantic, project, confirmation, and pin signals', () => {
     const memory = makeMemory()
     const strong = hybridScore('initial batch quantity', memory, projectId, [1, 0], [1, 0])
-    const weak = hybridScore('holiday itinerary', { ...memory, pinned: false, user_confirmed: false }, null, [1, 0], [0, 1])
+    const weak = hybridScore(
+      'holiday itinerary',
+      { ...memory, pinned: false, user_confirmed: false },
+      null,
+      [1, 0],
+      [0, 1]
+    )
     expect(strong).toBeGreaterThan(weak)
   })
 
@@ -56,9 +62,22 @@ describe('hybrid retrieval ranking', () => {
 
 function makeMemory(): Memory {
   return {
-    memory_id: createId('mem'), type: 'decision', statement: 'The initial batch quantity is 1,000 units.',
-    project_id: projectId, chat_id: createId('chat'), source_message_ids: [createId('msg')], state: 'confirmed',
-    confidence: 0.95, created_at: now, updated_at: now, effective_at: now, supersedes: [], superseded_by: null,
-    entities: ['Batch'], tags: ['batch', 'quantity'], user_confirmed: true, pinned: true
+    memory_id: createId('mem'),
+    type: 'decision',
+    statement: 'The initial batch quantity is 1,000 units.',
+    project_id: projectId,
+    chat_id: createId('chat'),
+    source_message_ids: [createId('msg')],
+    state: 'confirmed',
+    confidence: 0.95,
+    created_at: now,
+    updated_at: now,
+    effective_at: now,
+    supersedes: [],
+    superseded_by: null,
+    entities: ['Batch'],
+    tags: ['batch', 'quantity'],
+    user_confirmed: true,
+    pinned: true
   }
 }

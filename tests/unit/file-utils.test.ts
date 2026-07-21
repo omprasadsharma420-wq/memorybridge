@@ -41,7 +41,9 @@ describe('safe file utilities', () => {
   })
 
   it('prevents path traversal outside the vault', () => {
-    expect(() => resolveInside('C:\\vault', '..', 'secret.txt')).toThrow(/leaves the connected vault/)
+    expect(() => resolveInside('C:\\vault', '..', 'secret.txt')).toThrow(
+      /leaves the connected vault/
+    )
     expect(resolveInside('C:\\vault', 'chats', 'safe')).toContain('safe')
   })
 })

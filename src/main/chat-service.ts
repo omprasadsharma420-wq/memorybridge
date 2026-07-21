@@ -1,11 +1,5 @@
 import { createId } from '../shared/ids'
-import type {
-  AppSettings,
-  Chat,
-  Memory,
-  Message,
-  MessageStatus
-} from '../shared/schemas'
+import type { AppSettings, Chat, Memory, Message, MessageStatus } from '../shared/schemas'
 import type { ChatTurnResult, RetrievedContextItem } from '../shared/contracts'
 import { deterministicTitle } from '../shared/text'
 import { safeErrorCategory } from '../shared/security'
@@ -51,7 +45,10 @@ export class ChatService {
     await this.repository.appendMessage(userMessage)
     let activeChat = chat
     const previousMessages = await this.repository.readMessages(chatId)
-    if (chat.title === 'New chat' && previousMessages.filter((message) => message.role === 'user').length === 1) {
+    if (
+      chat.title === 'New chat' &&
+      previousMessages.filter((message) => message.role === 'user').length === 1
+    ) {
       activeChat = await this.repository.updateChat(chatId, { title: deterministicTitle(content) })
     }
     return this.generateAssistant(activeChat, userMessage)
@@ -62,7 +59,8 @@ export class ChatService {
     const userMessage = (await this.repository.readMessages(chatId)).find(
       (message) => message.message_id === userMessageId && message.role === 'user'
     )
-    if (!userMessage) throw new AppError('MESSAGE_NOT_FOUND', 'The original user message could not be found.')
+    if (!userMessage)
+      throw new AppError('MESSAGE_NOT_FOUND', 'The original user message could not be found.')
     return this.generateAssistant(chat, userMessage)
   }
 
@@ -115,7 +113,11 @@ export class ChatService {
         userMessage.message_id,
         retrievedContext
       )
-      assistantMessage = { ...assistantMessage, status: 'streaming', updated_at: new Date().toISOString() }
+      assistantMessage = {
+        ...assistantMessage,
+        status: 'streaming',
+        updated_at: new Date().toISOString()
+      }
       await this.repository.appendMessage(assistantMessage)
       for await (const chunk of provider.streamChat({
         model: settings.chatModel,

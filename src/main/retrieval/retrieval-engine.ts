@@ -14,7 +14,8 @@ export class RetrievalEngine {
     provider: AIProvider,
     excludeChatId?: string
   ): Promise<RetrievedContextItem[]> {
-    if (settings.maximumRetrievedMemories === 0 || settings.retrievalCharacterBudget === 0) return []
+    if (settings.maximumRetrievedMemories === 0 || settings.retrievalCharacterBudget === 0)
+      return []
     const memories = this.repository.listActiveMemories(projectId)
     let queryVector: number[] | null = null
     let vectors = new Map<string, number[]>()
@@ -41,12 +42,16 @@ export class RetrievalEngine {
       .slice(0, settings.maximumRetrievedMemories)
 
     const chats = new Map((await this.repository.listChats()).map((chat) => [chat.chat_id, chat]))
-    const projects = new Map((await this.repository.listProjects()).map((project) => [project.project_id, project]))
+    const projects = new Map(
+      (await this.repository.listProjects()).map((project) => [project.project_id, project])
+    )
     const items: RetrievedContextItem[] = []
     let usedCharacters = 0
     for (const { memory, score } of ranked) {
       const messages = await this.repository.readMessages(memory.chat_id)
-      const sources = messages.filter((message) => memory.source_message_ids.includes(message.message_id))
+      const sources = messages.filter((message) =>
+        memory.source_message_ids.includes(message.message_id)
+      )
       const sourceExcerpt = excerpt(sources.map((message) => message.content).join(' '), 320)
       const cost = memory.statement.length + sourceExcerpt.length
       if (usedCharacters + cost > settings.retrievalCharacterBudget) continue
@@ -58,7 +63,7 @@ export class RetrievalEngine {
         statement: memory.statement,
         memoryType: memory.type,
         projectId: memory.project_id,
-        projectName: memory.project_id ? projects.get(memory.project_id)?.name ?? null : null,
+        projectName: memory.project_id ? (projects.get(memory.project_id)?.name ?? null) : null,
         sourceChatId: memory.chat_id,
         sourceChatTitle: chat?.title ?? 'Unknown chat',
         sourceMessageIds: memory.source_message_ids,
@@ -95,7 +100,7 @@ export class RetrievalEngine {
           statement: result.excerpt,
           memoryType: 'transcript_excerpt',
           projectId: result.projectId,
-          projectName: result.projectId ? projects.get(result.projectId)?.name ?? null : null,
+          projectName: result.projectId ? (projects.get(result.projectId)?.name ?? null) : null,
           sourceChatId: result.chatId,
           sourceChatTitle: result.title,
           sourceMessageIds: [result.id],
@@ -125,25 +130,31 @@ export function hybridScore(
   const statementWords = keywords(memory.statement)
   const intersection = [...queryWords].filter((word) => statementWords.has(word)).length
   const keywordScore = queryWords.size ? intersection / queryWords.size : 0
-  const exactPhrase = normalizedQuery.length > 4 && normalizedStatement.includes(normalizedQuery) ? 1 : 0
-  const semantic = queryVector && memoryVector ? Math.max(0, cosineSimilarity(queryVector, memoryVector)) : 0
+  const exactPhrase =
+    normalizedQuery.length > 4 && normalizedStatement.includes(normalizedQuery) ? 1 : 0
+  const semantic =
+    queryVector && memoryVector ? Math.max(0, cosineSimilarity(queryVector, memoryVector)) : 0
   if (keywordScore === 0 && exactPhrase === 0 && semantic < 0.2) return 0
-  const project = projectId && memory.project_id === projectId ? 1 : memory.project_id === null ? 0.3 : 0
+  const project =
+    projectId && memory.project_id === projectId ? 1 : memory.project_id === null ? 0.3 : 0
   const confirmation = memory.user_confirmed || memory.state === 'confirmed' ? 1 : 0
   const pinned = memory.pinned ? 1 : 0
   const ageDays = Math.max(0, (Date.now() - Date.parse(memory.updated_at)) / 86_400_000)
   const recency = 1 / (1 + ageDays / 180)
-  const typeBoost = ['decision', 'instruction', 'preference', 'project_state'].includes(memory.type) ? 1 : 0.5
+  const typeBoost = ['decision', 'instruction', 'preference', 'project_state'].includes(memory.type)
+    ? 1
+    : 0.5
   return (
-    keywordScore * 0.36 +
-    semantic * 0.24 +
-    project * 0.14 +
-    exactPhrase * 0.08 +
-    confirmation * 0.06 +
-    pinned * 0.05 +
-    recency * 0.04 +
-    typeBoost * 0.03
-  ) * memory.confidence
+    (keywordScore * 0.36 +
+      semantic * 0.24 +
+      project * 0.14 +
+      exactPhrase * 0.08 +
+      confirmation * 0.06 +
+      pinned * 0.05 +
+      recency * 0.04 +
+      typeBoost * 0.03) *
+    memory.confidence
+  )
 }
 
 export function cosineSimilarity(left: number[], right: number[]): number {

@@ -81,7 +81,9 @@ export const createProjectInputSchema = z.object({
 export const updateProjectInputSchema = createProjectInputSchema.partial().extend({
   projectId: projectIdSchema
 })
-export const createChatInputSchema = z.object({ projectId: projectIdSchema.nullable().default(null) })
+export const createChatInputSchema = z.object({
+  projectId: projectIdSchema.nullable().default(null)
+})
 export const updateChatInputSchema = z.object({
   chatId: chatIdSchema,
   title: z.string().trim().min(1).max(160).optional(),
@@ -102,8 +104,14 @@ export const searchInputSchema = z.object({
   chatId: chatIdSchema.optional(),
   memoryType: memoryTypeSchema.optional(),
   state: memoryStateSchema.optional(),
-  fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  fromDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  toDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
   includeHistory: z.boolean().default(false),
   limit: z.number().int().min(1).max(100).default(30)
 })

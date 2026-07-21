@@ -20,9 +20,9 @@ describe('shared invariants', () => {
   })
 
   it('creates a deterministic useful title without an AI call', () => {
-    expect(deterministicTitle('Please help me decide the initial supplier quantity for the product')).toBe(
-      'Help me decide initial supplier quantity product'
-    )
+    expect(
+      deterministicTitle('Please help me decide the initial supplier quantity for the product')
+    ).toBe('Help me decide initial supplier quantity product')
   })
 
   it('validates message states and extraction provenance shape', () => {

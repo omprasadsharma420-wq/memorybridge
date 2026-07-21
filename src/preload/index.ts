@@ -27,12 +27,14 @@ const api: MemoryBridgeApi = {
   rerunExtraction: (chatId) => ipcRenderer.invoke('extraction:rerun', { chatId }),
   exportDiagnostics: () => ipcRenderer.invoke('diagnostics:export'),
   onStream: (callback) => {
-    const listener = (_event: Electron.IpcRendererEvent, message: Message): void => callback(message)
+    const listener = (_event: Electron.IpcRendererEvent, message: Message): void =>
+      callback(message)
     ipcRenderer.on('chat:stream', listener)
     return () => ipcRenderer.removeListener('chat:stream', listener)
   },
   onVaultStatus: (callback) => {
-    const listener = (_event: Electron.IpcRendererEvent, status: VaultStatus): void => callback(status)
+    const listener = (_event: Electron.IpcRendererEvent, status: VaultStatus): void =>
+      callback(status)
     ipcRenderer.on('vault:status', listener)
     return () => ipcRenderer.removeListener('vault:status', listener)
   }

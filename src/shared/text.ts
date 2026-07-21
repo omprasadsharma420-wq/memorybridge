@@ -46,7 +46,10 @@ export function sanitizeFilename(input: string, fallback = 'untitled', maxLength
     .replace(WINDOWS_RESERVED, '-')
     .replace(/\.+$/g, '')
     .replace(/^-+|-+$/g, '')
-  const safe = !normalized || RESERVED_NAMES.test(normalized) ? `${fallback}-${normalized || 'item'}` : normalized
+  const safe =
+    !normalized || RESERVED_NAMES.test(normalized)
+      ? `${fallback}-${normalized || 'item'}`
+      : normalized
   return safe.slice(0, maxLength).trim() || fallback
 }
 
@@ -61,7 +64,10 @@ export function slugify(input: string, fallback = 'untitled'): string {
 
 export function deterministicTitle(input: string, maxLength = 64): string {
   const clean = normalizeWhitespace(
-    input.replace(/[`*_#>()]/g, ' ').replaceAll('[', ' ').replaceAll(']', ' ')
+    input
+      .replace(/[`*_#>()]/g, ' ')
+      .replaceAll('[', ' ')
+      .replaceAll(']', ' ')
   )
   const tokens = clean.split(' ').filter(Boolean)
   const meaningful = tokens.filter((token) => !STOP_WORDS.has(token.toLowerCase()))

@@ -11,7 +11,12 @@ const projectId = createId('project')
 
 describe('memory extraction and reconciliation', () => {
   it('does not promote a proposal to a decision', () => {
-    expect(deterministicCandidates([{ role: 'user', messageId: source, content: 'We could use option A.' }], [])).toEqual([])
+    expect(
+      deterministicCandidates(
+        [{ role: 'user', messageId: source, content: 'We could use option A.' }],
+        []
+      )
+    ).toEqual([])
   })
 
   it('recognizes decisions, plans, completions, preferences, and rejected options distinctly', () => {
@@ -21,7 +26,11 @@ describe('memory extraction and reconciliation', () => {
       'The form was submitted today.',
       'Remember that I prefer concise reports.',
       'Do not use cloud storage.'
-    ].map((content, index) => ({ role: 'user', messageId: index === 0 ? source : createId('msg'), content }))
+    ].map((content, index) => ({
+      role: 'user',
+      messageId: index === 0 ? source : createId('msg'),
+      content
+    }))
     const candidates = deterministicCandidates(messages, [])
     expect(candidates.map((candidate) => candidate.type)).toEqual([
       'decision',
@@ -31,7 +40,9 @@ describe('memory extraction and reconciliation', () => {
       'instruction',
       'rejected_option'
     ])
-    expect(candidates.find((candidate) => candidate.type === 'completed_item')?.represents_completed_work).toBe(true)
+    expect(
+      candidates.find((candidate) => candidate.type === 'completed_item')?.represents_completed_work
+    ).toBe(true)
   })
 
   it('controls normalized duplicates and retains all evidence', () => {
@@ -39,13 +50,23 @@ describe('memory extraction and reconciliation', () => {
       [{ role: 'user', messageId: source, content: 'We have decided to use Electron.' }],
       []
     )[0]!
-    const first = reconcileMemories([], [candidate], { chatId, projectId, now: new Date().toISOString() })
+    const first = reconcileMemories([], [candidate], {
+      chatId,
+      projectId,
+      now: new Date().toISOString()
+    })
     const anotherSource = createId('msg')
     const duplicate = { ...candidate, source_message_ids: [anotherSource] }
     expect(findDuplicate(first.memories, duplicate, projectId)).toBeDefined()
-    const second = reconcileMemories(first.memories, [duplicate], { chatId, projectId, now: new Date().toISOString() })
+    const second = reconcileMemories(first.memories, [duplicate], {
+      chatId,
+      projectId,
+      now: new Date().toISOString()
+    })
     expect(second.memories).toHaveLength(1)
-    expect(second.memories[0]?.source_message_ids).toEqual(expect.arrayContaining([source, anotherSource]))
+    expect(second.memories[0]?.source_message_ids).toEqual(
+      expect.arrayContaining([source, anotherSource])
+    )
   })
 
   it('uses semantic vectors to control paraphrased duplicates when available', () => {
@@ -54,7 +75,9 @@ describe('memory extraction and reconciliation', () => {
       statement: 'Reports should be concise and direct.'
     })
     const candidate = deterministicCandidates(
-      [{ role: 'user', messageId: source, content: 'Remember that I prefer brief direct reports.' }],
+      [
+        { role: 'user', messageId: source, content: 'Remember that I prefer brief direct reports.' }
+      ],
       []
     )[0]!
     expect(
@@ -70,15 +93,35 @@ describe('memory extraction and reconciliation', () => {
 
   it('supersedes an older conflicting decision while preserving both records', () => {
     const firstCandidate = deterministicCandidates(
-      [{ role: 'user', messageId: source, content: 'We have decided the initial batch will contain 5,000 units.' }],
+      [
+        {
+          role: 'user',
+          messageId: source,
+          content: 'We have decided the initial batch will contain 5,000 units.'
+        }
+      ],
       []
     )[0]!
-    const first = reconcileMemories([], [firstCandidate], { chatId, projectId, now: '2026-01-01T00:00:00.000Z' })
+    const first = reconcileMemories([], [firstCandidate], {
+      chatId,
+      projectId,
+      now: '2026-01-01T00:00:00.000Z'
+    })
     const secondCandidate = deterministicCandidates(
-      [{ role: 'user', messageId: createId('msg'), content: 'We have decided the initial batch will contain 1,000–1,500 units.' }],
+      [
+        {
+          role: 'user',
+          messageId: createId('msg'),
+          content: 'We have decided the initial batch will contain 1,000–1,500 units.'
+        }
+      ],
       first.memories
     )[0]!
-    const second = reconcileMemories(first.memories, [secondCandidate], { chatId, projectId, now: '2026-01-02T00:00:00.000Z' })
+    const second = reconcileMemories(first.memories, [secondCandidate], {
+      chatId,
+      projectId,
+      now: '2026-01-02T00:00:00.000Z'
+    })
     expect(second.memories).toHaveLength(2)
     const old = second.memories.find((memory) => memory.statement.includes('5,000'))
     const current = second.memories.find((memory) => memory.statement.includes('1,000'))
@@ -94,12 +137,20 @@ describe('memory extraction and reconciliation', () => {
     )[0]!
     const first = reconcileMemories([], [commitmentCandidate], { chatId, projectId })
     const completedCandidate = deterministicCandidates(
-      [{ role: 'user', messageId: createId('msg'), content: 'The application was submitted this morning.' }],
+      [
+        {
+          role: 'user',
+          messageId: createId('msg'),
+          content: 'The application was submitted this morning.'
+        }
+      ],
       first.memories
     )[0]!
     const second = reconcileMemories(first.memories, [completedCandidate], { chatId, projectId })
     expect(second.memories.find((memory) => memory.type === 'commitment')?.state).toBe('completed')
-    expect(second.memories.find((memory) => memory.type === 'completed_item')?.state).toBe('completed')
+    expect(second.memories.find((memory) => memory.type === 'completed_item')?.state).toBe(
+      'completed'
+    )
   })
 
   it('does not silently supersede a confirmed memory with an unconfirmed candidate', () => {
@@ -113,7 +164,9 @@ describe('memory extraction and reconciliation', () => {
       user_confirmed: false
     }
     const result = reconcileMemories([confirmed], [candidate], { chatId, projectId })
-    expect(result.memories.find((memory) => memory.memory_id === confirmed.memory_id)?.state).toBe('confirmed')
+    expect(result.memories.find((memory) => memory.memory_id === confirmed.memory_id)?.state).toBe(
+      'confirmed'
+    )
     expect(result.added[0]?.state).toBe('disputed')
   })
 })
@@ -121,9 +174,23 @@ describe('memory extraction and reconciliation', () => {
 function baseMemory(patch: Partial<Memory> = {}): Memory {
   const now = new Date().toISOString()
   return {
-    memory_id: createId('mem'), type: 'fact', statement: 'The quantity is 5 units.', project_id: projectId,
-    chat_id: chatId, source_message_ids: [source], state: 'active', confidence: 0.9, created_at: now,
-    updated_at: now, effective_at: now, supersedes: [], superseded_by: null, entities: [], tags: ['quantity'],
-    user_confirmed: false, pinned: false, ...patch
+    memory_id: createId('mem'),
+    type: 'fact',
+    statement: 'The quantity is 5 units.',
+    project_id: projectId,
+    chat_id: chatId,
+    source_message_ids: [source],
+    state: 'active',
+    confidence: 0.9,
+    created_at: now,
+    updated_at: now,
+    effective_at: now,
+    supersedes: [],
+    superseded_by: null,
+    entities: [],
+    tags: ['quantity'],
+    user_confirmed: false,
+    pinned: false,
+    ...patch
   }
 }

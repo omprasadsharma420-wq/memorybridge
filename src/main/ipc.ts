@@ -66,7 +66,9 @@ export function registerIpc(service: AppService): void {
   ipcMain.handle('memory:action', (_event, input: unknown) =>
     service.memoryAction(memoryActionInputSchema.parse(input))
   )
-  ipcMain.handle('search:run', (_event, input: unknown) => service.search(searchInputSchema.parse(input)))
+  ipcMain.handle('search:run', (_event, input: unknown) =>
+    service.search(searchInputSchema.parse(input))
+  )
   ipcMain.handle('settings:update', (_event, input: unknown) =>
     service.updateSettings(settingsInputSchema.parse(input))
   )

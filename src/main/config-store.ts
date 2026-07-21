@@ -1,6 +1,11 @@
 import { join } from 'node:path'
 import { appSettingsSchema, type AppSettings, type SettingsPatch } from '../shared/schemas'
-import { atomicWriteJson, ensureDirectory, pathExists, readValidatedJson } from './storage/file-utils'
+import {
+  atomicWriteJson,
+  ensureDirectory,
+  pathExists,
+  readValidatedJson
+} from './storage/file-utils'
 
 export class ConfigStore {
   private readonly configPath: string

@@ -1,4 +1,9 @@
-import type { AIProvider, ChatRequest, ProviderHealth, StructuredGenerationRequest } from './provider'
+import type {
+  AIProvider,
+  ChatRequest,
+  ProviderHealth,
+  StructuredGenerationRequest
+} from './provider'
 import { deterministicCandidates } from '../memory/deterministic-extractor'
 import { extractionOutputSchema } from '../../shared/schemas'
 
@@ -23,14 +28,16 @@ export class MockProvider implements AIProvider {
 
   async *streamChat(request: ChatRequest): AsyncIterable<string> {
     this.callCount += 1
-    const latest = [...request.messages].reverse().find((message) => message.role === 'user')?.content ?? ''
+    const latest =
+      [...request.messages].reverse().find((message) => message.role === 'user')?.content ?? ''
     if (latest.includes('[mock:fail]')) throw new Error('MockProviderFailure')
     if (latest.includes('[mock:timeout]')) {
       await wait(40, request.signal)
       throw new Error('MockProviderTimeout')
     }
     const response = `Mock response saved locally. I received: ${latest.replace(/\[mock:[^\]]+\]/g, '').trim()}`
-    const shouldInterrupt = latest.includes('[mock:interrupt]') && !this.interruptedInputs.has(latest)
+    const shouldInterrupt =
+      latest.includes('[mock:interrupt]') && !this.interruptedInputs.has(latest)
     if (shouldInterrupt) this.interruptedInputs.add(latest)
     const interruptAt = shouldInterrupt ? Math.max(10, Math.floor(response.length / 2)) : null
     for (let index = 0; index < response.length; index += 12) {
@@ -48,10 +55,16 @@ export class MockProvider implements AIProvider {
       .filter((message) => message.role !== 'system')
       .map((message) => {
         const match = /^\[([^\]]+)\]\s*([\s\S]*)$/.exec(message.content)
-        return { role: message.role, messageId: match?.[1] ?? '', content: match?.[2] ?? message.content }
+        return {
+          role: message.role,
+          messageId: match?.[1] ?? '',
+          content: match?.[2] ?? message.content
+        }
       })
       .filter((message) => message.messageId.startsWith('msg_'))
-    const output = extractionOutputSchema.parse({ candidates: deterministicCandidates(sourceMessages, []) })
+    const output = extractionOutputSchema.parse({
+      candidates: deterministicCandidates(sourceMessages, [])
+    })
     return request.schema.parse(output)
   }
 

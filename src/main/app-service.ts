@@ -61,7 +61,10 @@ export class AppService {
         await this.vault.open(this.settings.lastVaultPath)
         await this.initializeRepository()
       } catch (error) {
-        await this.logger.write({ event: 'vault.auto_open_failed', category: safeErrorCategory(error) })
+        await this.logger.write({
+          event: 'vault.auto_open_failed',
+          category: safeErrorCategory(error)
+        })
         this.vault.disconnect()
       }
     }
@@ -230,7 +233,8 @@ export class AppService {
       defaultPath: `memorybridge-diagnostics-${new Date().toISOString().slice(0, 10)}.json`,
       filters: [{ name: 'JSON', extensions: ['json'] }]
     })
-    if (result.canceled || !result.filePath) throw new AppError('EXPORT_CANCELLED', 'Diagnostic export was cancelled.')
+    if (result.canceled || !result.filePath)
+      throw new AppError('EXPORT_CANCELLED', 'Diagnostic export was cancelled.')
     const vaultStatus = await this.vault.status()
     await atomicWriteJson(result.filePath, {
       application: 'MemoryBridge',
@@ -256,7 +260,13 @@ export class AppService {
       },
       hasStoredApiKey: await this.credentials.has(),
       recentSafeEvents: await this.logger.recent(50),
-      excludes: ['transcripts', 'message content', 'memory statements', 'credentials', 'vault paths']
+      excludes: [
+        'transcripts',
+        'message content',
+        'memory statements',
+        'credentials',
+        'vault paths'
+      ]
     })
     return { path: result.filePath }
   }
@@ -314,17 +324,20 @@ export class AppService {
   }
 
   private get repo(): VaultRepository {
-    if (!this.repository) throw new AppError('VAULT_DISCONNECTED', 'Connect a vault to continue.', true)
+    if (!this.repository)
+      throw new AppError('VAULT_DISCONNECTED', 'Connect a vault to continue.', true)
     return this.repository
   }
 
   private get memory(): MemoryEngine {
-    if (!this.memoryEngine) throw new AppError('VAULT_DISCONNECTED', 'Connect a vault to continue.', true)
+    if (!this.memoryEngine)
+      throw new AppError('VAULT_DISCONNECTED', 'Connect a vault to continue.', true)
     return this.memoryEngine
   }
 
   private get chat(): ChatService {
-    if (!this.chatService) throw new AppError('VAULT_DISCONNECTED', 'Connect a vault to continue.', true)
+    if (!this.chatService)
+      throw new AppError('VAULT_DISCONNECTED', 'Connect a vault to continue.', true)
     return this.chatService
   }
 }

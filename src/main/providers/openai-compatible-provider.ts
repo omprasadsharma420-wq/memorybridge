@@ -29,7 +29,8 @@ export class OpenAICompatibleProvider implements AIProvider {
       },
       request.signal
     )
-    if (!response.body) throw new AppError('PROVIDER_EMPTY_STREAM', 'The provider returned no stream.', true)
+    if (!response.body)
+      throw new AppError('PROVIDER_EMPTY_STREAM', 'The provider returned no stream.', true)
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -78,11 +79,15 @@ export class OpenAICompatibleProvider implements AIProvider {
     )
     const body = (await response.json()) as Record<string, unknown>
     const content = extractMessageContent(body)
-    if (!content) throw new AppError('PROVIDER_INVALID_OUTPUT', 'The provider returned no structured content.')
+    if (!content)
+      throw new AppError('PROVIDER_INVALID_OUTPUT', 'The provider returned no structured content.')
     try {
       return request.schema.parse(JSON.parse(content))
     } catch {
-      throw new AppError('PROVIDER_INVALID_OUTPUT', 'The provider returned invalid structured content.')
+      throw new AppError(
+        'PROVIDER_INVALID_OUTPUT',
+        'The provider returned invalid structured content.'
+      )
     }
   }
 
@@ -93,7 +98,9 @@ export class OpenAICompatibleProvider implements AIProvider {
       { method: 'POST', body: JSON.stringify({ model, input: texts }) },
       signal
     )
-    const body = (await response.json()) as { data?: Array<{ embedding?: number[]; index?: number }> }
+    const body = (await response.json()) as {
+      data?: Array<{ embedding?: number[]; index?: number }>
+    }
     const rows = [...(body.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
     if (rows.length !== texts.length || rows.some((row) => !Array.isArray(row.embedding))) {
       throw new AppError('PROVIDER_INVALID_EMBEDDING', 'The provider returned invalid embeddings.')
@@ -108,7 +115,8 @@ export class OpenAICompatibleProvider implements AIProvider {
     } catch (error) {
       return {
         ok: false,
-        message: error instanceof Error ? redactSecrets(error.message) : 'Provider connection failed.'
+        message:
+          error instanceof Error ? redactSecrets(error.message) : 'Provider connection failed.'
       }
     }
   }
@@ -118,7 +126,8 @@ export class OpenAICompatibleProvider implements AIProvider {
     init: RequestInit,
     callerSignal?: AbortSignal
   ): Promise<Response> {
-    if (!this.options.apiKey) throw new AppError('API_KEY_MISSING', 'No provider API key is stored.')
+    if (!this.options.apiKey)
+      throw new AppError('API_KEY_MISSING', 'No provider API key is stored.')
     let lastError: unknown
     for (let attempt = 0; attempt <= this.options.maxRetries; attempt += 1) {
       const timeout = AbortSignal.timeout(this.options.timeoutMs)

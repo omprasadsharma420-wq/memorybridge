@@ -57,7 +57,10 @@ export class VaultRepository {
       for (const suffix of ['', '-journal', '-wal', '-shm']) {
         const source = `${indexPath}${suffix}`
         if (await pathExists(source)) {
-          await rename(source, this.vault.path('backups', `memorybridge.sqlite.corrupt-${stamp}${suffix}`))
+          await rename(
+            source,
+            this.vault.path('backups', `memorybridge.sqlite.corrupt-${stamp}${suffix}`)
+          )
         }
       }
       this.index = new IndexDatabase(indexPath)
@@ -87,15 +90,25 @@ export class VaultRepository {
     const directory = this.vault.path('projects', `${project.project_id}--${project.slug}`)
     await ensureDirectory(directory)
     await atomicWriteJson(join(directory, 'project.json'), project)
-    await atomicWriteJson(join(directory, 'project-memory.json'), { schema_version: 1, memory_ids: [] })
+    await atomicWriteJson(join(directory, 'project-memory.json'), {
+      schema_version: 1,
+      memory_ids: []
+    })
     this.projectDirectories.set(project.project_id, directory)
     this.db.upsertProject(project)
     return project
   }
 
-  async updateProject(projectId: string, patch: { name?: string; description?: string }): Promise<Project> {
+  async updateProject(
+    projectId: string,
+    patch: { name?: string; description?: string }
+  ): Promise<Project> {
     const project = await this.getProject(projectId)
-    const updated = projectSchema.parse({ ...project, ...patch, updated_at: new Date().toISOString() })
+    const updated = projectSchema.parse({
+      ...project,
+      ...patch,
+      updated_at: new Date().toISOString()
+    })
     await atomicWriteJson(join(this.getProjectDirectory(projectId), 'project.json'), updated)
     this.db.upsertProject(updated)
     return updated
@@ -112,7 +125,10 @@ export class VaultRepository {
 
   async getProject(projectId: string): Promise<Project> {
     await this.discoverProjects()
-    return readValidatedJson(join(this.getProjectDirectory(projectId), 'project.json'), projectSchema)
+    return readValidatedJson(
+      join(this.getProjectDirectory(projectId), 'project.json'),
+      projectSchema
+    )
   }
 
   async createChat(projectId: string | null = null): Promise<Chat> {
@@ -207,7 +223,9 @@ export class VaultRepository {
 
   async listMemories(chatId?: string): Promise<Memory[]> {
     await this.discoverChats()
-    const directories = chatId ? [this.getChatDirectory(chatId)] : [...this.chatDirectories.values()]
+    const directories = chatId
+      ? [this.getChatDirectory(chatId)]
+      : [...this.chatDirectories.values()]
     const memories: Memory[] = []
     for (const directory of directories) {
       const path = join(directory, 'memories.json')
@@ -271,7 +289,12 @@ export class VaultRepository {
       const extractionRuns = await readJsonLines(extractionPath, extractionRunSchema)
       for (const run of extractionRuns.values) this.db.upsertExtractionRun(run)
     }
-    return { projects: projects.length, chats: chats.length, messages: messageCount, memories: memoryCount }
+    return {
+      projects: projects.length,
+      chats: chats.length,
+      messages: messageCount,
+      memories: memoryCount
+    }
   }
 
   async recoverInterruptedMessages(): Promise<number> {
@@ -342,10 +365,13 @@ export class VaultRepository {
       const memoryIds = all
         .filter((memory) => memory.project_id === project.project_id && memory.state !== 'deleted')
         .map((memory) => memory.memory_id)
-      await atomicWriteJson(join(this.getProjectDirectory(project.project_id), 'project-memory.json'), {
-        schema_version: 1,
-        memory_ids: memoryIds
-      })
+      await atomicWriteJson(
+        join(this.getProjectDirectory(project.project_id), 'project-memory.json'),
+        {
+          schema_version: 1,
+          memory_ids: memoryIds
+        }
+      )
     }
   }
 

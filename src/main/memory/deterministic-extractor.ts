@@ -31,7 +31,9 @@ export function deterministicCandidates(
       if (/\bdo not\b|\bdon't\b|\bnever\b/.test(lower)) {
         candidates.push(candidate('instruction', sentence, source, 0.94, existing, true))
         if (/\b(?:use|choose|adopt|store)\b/.test(lower)) {
-          candidates.push(candidate('rejected_option', rejectedStatement(sentence), source, 0.9, existing, true))
+          candidates.push(
+            candidate('rejected_option', rejectedStatement(sentence), source, 0.9, existing, true)
+          )
         }
         continue
       }
@@ -99,8 +101,12 @@ function candidate(
   const duplicate = existing.find(
     (memory) => memory.type === type && normalizeForComparison(memory.statement) === normalized
   )
-  const related = existing.filter((memory) => keywordSimilarity(memory.statement, statement) >= 0.35)
-  const hasChangeLanguage = /\b(no longer|instead|changed|now|revised|updated|rather than)\b/i.test(statement)
+  const related = existing.filter(
+    (memory) => keywordSimilarity(memory.statement, statement) >= 0.35
+  )
+  const hasChangeLanguage = /\b(no longer|instead|changed|now|revised|updated|rather than)\b/i.test(
+    statement
+  )
   const differentNumber = related.some((memory) => numbers(memory.statement) !== numbers(statement))
   const supersedes =
     hasChangeLanguage || differentNumber
@@ -127,8 +133,10 @@ function candidate(
 }
 
 function isProposalOnly(lower: string): boolean {
-  return /\b(?:could|might|maybe|may|what if|consider)\b/.test(lower) &&
+  return (
+    /\b(?:could|might|maybe|may|what if|consider)\b/.test(lower) &&
     !/\b(?:decided|confirmed|completed|submitted|agreed)\b/.test(lower)
+  )
 }
 
 function isCompleted(lower: string): boolean {

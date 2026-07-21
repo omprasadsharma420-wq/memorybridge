@@ -6,7 +6,8 @@ const SECRET_PATTERNS = [
 
 export function redactSecrets(value: string): string {
   return SECRET_PATTERNS.reduce(
-    (redacted, pattern) => redacted.replace(pattern, (_match, prefix?: string) => `${prefix ?? ''}[REDACTED]`),
+    (redacted, pattern) =>
+      redacted.replace(pattern, (_match, prefix?: string) => `${prefix ?? ''}[REDACTED]`),
     value
   )
 }

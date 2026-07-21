@@ -161,7 +161,9 @@ export class IndexDatabase {
           memory.project_id ?? '',
           memory.chat_id
         )
-      this.db.prepare('DELETE FROM memory_relationships WHERE source_memory_id = ?').run(memory.memory_id)
+      this.db
+        .prepare('DELETE FROM memory_relationships WHERE source_memory_id = ?')
+        .run(memory.memory_id)
       for (const target of memory.supersedes) {
         this.db
           .prepare(
@@ -200,7 +202,10 @@ export class IndexDatabase {
     const rows = this.db
       .prepare('SELECT memory_id, vector FROM embeddings WHERE model = ?')
       .all(model) as Array<{ memory_id: string; vector: string }>
-    return rows.map((row) => ({ memoryId: row.memory_id, vector: JSON.parse(row.vector) as number[] }))
+    return rows.map((row) => ({
+      memoryId: row.memory_id,
+      vector: JSON.parse(row.vector) as number[]
+    }))
   }
 
   search(input: SearchInput): SearchResult[] {
@@ -393,7 +398,9 @@ export class IndexDatabase {
       name: string
     }>
     if (!messageColumns.some((column) => column.name === 'retrieved_context_ids')) {
-      this.db.exec("ALTER TABLE messages ADD COLUMN retrieved_context_ids TEXT NOT NULL DEFAULT '[]'")
+      this.db.exec(
+        "ALTER TABLE messages ADD COLUMN retrieved_context_ids TEXT NOT NULL DEFAULT '[]'"
+      )
     }
     this.db
       .prepare('INSERT OR IGNORE INTO migration_state (version, applied_at) VALUES (?, ?)')
@@ -419,7 +426,8 @@ function buildFilters(
 ): { sql: string; values: Array<string | number | null> } {
   const clauses: string[] = []
   const values: Array<string | number | null> = []
-  if (!input.includeHistory && !input.state) clauses.push(`${alias}.state NOT IN ('superseded','rejected','deleted')`)
+  if (!input.includeHistory && !input.state)
+    clauses.push(`${alias}.state NOT IN ('superseded','rejected','deleted')`)
   if (input.projectId) {
     clauses.push(`${alias}.project_id = ?`)
     values.push(input.projectId)

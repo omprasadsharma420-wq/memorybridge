@@ -44,7 +44,9 @@ function createWindow(): BrowserWindow {
 }
 
 void app.whenReady().then(async () => {
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
+  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) =>
+    callback(false)
+  )
   session.defaultSession.setPermissionCheckHandler(() => false)
   service = new AppService()
   await service.initialize()

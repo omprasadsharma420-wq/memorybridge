@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "codex/**"]
+    branches: [main, 'codex/**']
   pull_request:
 
 permissions:
@@ -13,7 +13,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 35
     env:
-      CI: "true"
+      CI: 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,6 +22,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm audit --audit-level=high
+      - run: npm run format:check
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run test:unit

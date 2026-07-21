@@ -22,9 +22,12 @@ export function reconcileMemories(
     const explicitDuplicate = candidate.duplicate_of
       ? memories.find((memory) => memory.memory_id === candidate.duplicate_of)
       : undefined
-    const likelyDuplicate = explicitDuplicate ?? findDuplicate(memories, candidate, context.projectId)
+    const likelyDuplicate =
+      explicitDuplicate ?? findDuplicate(memories, candidate, context.projectId)
     if (likelyDuplicate) {
-      const sourceIds = [...new Set([...likelyDuplicate.source_message_ids, ...candidate.source_message_ids])]
+      const sourceIds = [
+        ...new Set([...likelyDuplicate.source_message_ids, ...candidate.source_message_ids])
+      ]
       const updated: Memory = {
         ...likelyDuplicate,
         source_message_ids: sourceIds,
@@ -86,13 +89,17 @@ export function reconcileMemories(
       }
       const updated: Memory = {
         ...previous,
-        state: candidate.represents_completed_work && previous.type === 'commitment' ? 'completed' : 'superseded',
+        state:
+          candidate.represents_completed_work && previous.type === 'commitment'
+            ? 'completed'
+            : 'superseded',
         superseded_by: newMemory.memory_id,
         updated_at: now
       }
       replaceMemory(memories, updated)
       changed.set(updated.memory_id, updated)
-      if (!newMemory.supersedes.includes(previous.memory_id)) newMemory.supersedes.push(previous.memory_id)
+      if (!newMemory.supersedes.includes(previous.memory_id))
+        newMemory.supersedes.push(previous.memory_id)
     }
 
     if (candidate.conflicts_with && newMemory.supersedes.length === 0) {
@@ -120,7 +127,12 @@ export function findDuplicate(
 ): Memory | undefined {
   const normalized = normalizeForComparison(candidate.statement)
   return memories.find((memory) => {
-    if (memory.state === 'deleted' || memory.project_id !== projectId || memory.type !== candidate.type) return false
+    if (
+      memory.state === 'deleted' ||
+      memory.project_id !== projectId ||
+      memory.type !== candidate.type
+    )
+      return false
     if (normalizeForComparison(memory.statement) === normalized) return true
     const entityOverlap = candidate.entities.some((entity) => memory.entities.includes(entity))
     return keywordSimilarity(memory.statement, candidate.statement) >= (entityOverlap ? 0.62 : 0.82)

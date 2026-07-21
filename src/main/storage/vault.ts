@@ -38,7 +38,8 @@ export class VaultManager {
   }
 
   get identity(): VaultManifest {
-    if (!this.manifest) throw new AppError('VAULT_DISCONNECTED', 'The memory vault is not connected.', true)
+    if (!this.manifest)
+      throw new AppError('VAULT_DISCONNECTED', 'The memory vault is not connected.', true)
     return this.manifest
   }
 
@@ -54,9 +55,14 @@ export class VaultManager {
     }
     const entries = await readdir(root)
     if (entries.length > 0) {
-      const conflicts = entries.filter((entry) => VAULT_DIRECTORIES.includes(entry as (typeof VAULT_DIRECTORIES)[number]))
+      const conflicts = entries.filter((entry) =>
+        VAULT_DIRECTORIES.includes(entry as (typeof VAULT_DIRECTORIES)[number])
+      )
       if (conflicts.length > 0) {
-        throw new AppError('VAULT_FOLDER_CONFLICT', 'The selected folder contains conflicting vault directories.')
+        throw new AppError(
+          'VAULT_FOLDER_CONFLICT',
+          'The selected folder contains conflicting vault directories.'
+        )
       }
     }
     const manifest: VaultManifest = {
@@ -105,7 +111,11 @@ export class VaultManager {
     const manifestPath = join(this.rootPath, BRAND.vaultManifest)
     if (!(await pathExists(manifestPath))) {
       this.disconnect()
-      throw new AppError('VAULT_DISCONNECTED', 'The memory vault is unavailable. Locate it to continue.', true)
+      throw new AppError(
+        'VAULT_DISCONNECTED',
+        'The memory vault is unavailable. Locate it to continue.',
+        true
+      )
     }
     if (!(await isWritableDirectory(this.rootPath))) {
       throw new AppError('VAULT_READ_ONLY', 'The memory vault is connected but not writable.', true)

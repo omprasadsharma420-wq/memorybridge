@@ -107,7 +107,8 @@ export class MemoryEngine {
           )
           reconciliation.added.forEach((memory, index) => {
             const vector = vectors[index]
-            if (vector) this.repository.storeEmbedding(memory.memory_id, settings.embeddingModel, vector)
+            if (vector)
+              this.repository.storeEmbedding(memory.memory_id, settings.embeddingModel, vector)
           })
         } catch {
           // Semantic indexing is optional; keyword indexing remains complete.
@@ -137,7 +138,8 @@ export class MemoryEngine {
     const memory = memories.find((item) => item.memory_id === memoryId)
     if (!memory) return memories
     const now = new Date().toISOString()
-    if (action.kind === 'confirm') Object.assign(memory, { state: 'confirmed', user_confirmed: true, updated_at: now })
+    if (action.kind === 'confirm')
+      Object.assign(memory, { state: 'confirmed', user_confirmed: true, updated_at: now })
     if (action.kind === 'reject') Object.assign(memory, { state: 'rejected', updated_at: now })
     if (action.kind === 'delete') Object.assign(memory, { state: 'deleted', updated_at: now })
     if (action.kind === 'pin') Object.assign(memory, { pinned: true, updated_at: now })
@@ -164,7 +166,9 @@ export class MemoryEngine {
     if (action.kind === 'merge') {
       const target = memories.find((item) => item.memory_id === action.targetId)
       if (target && target.memory_id !== memory.memory_id) {
-        target.source_message_ids = [...new Set([...target.source_message_ids, ...memory.source_message_ids])]
+        target.source_message_ids = [
+          ...new Set([...target.source_message_ids, ...memory.source_message_ids])
+        ]
         target.confidence = Math.max(target.confidence, memory.confidence)
         target.updated_at = now
         memory.state = 'superseded'
@@ -214,9 +218,7 @@ async function applySemanticDuplicateHints(
         vector,
         existingVectors
       )
-      return matchId
-        ? { ...candidate, is_new: false, duplicate_of: matchId }
-        : candidate
+      return matchId ? { ...candidate, is_new: false, duplicate_of: matchId } : candidate
     })
   } catch {
     return candidates
@@ -255,7 +257,10 @@ function sameNumbers(left: string, right: string): boolean {
   return extract(left) === extract(right)
 }
 
-function relatedMemoryPrompt(existing: Memory[], messages: Message[]): Array<{ role: 'system'; content: string }> {
+function relatedMemoryPrompt(
+  existing: Memory[],
+  messages: Message[]
+): Array<{ role: 'system'; content: string }> {
   const conversation = messages.map((message) => message.content).join(' ')
   const related = existing
     .filter((memory) => !['deleted', 'rejected'].includes(memory.state))
@@ -268,7 +273,10 @@ function relatedMemoryPrompt(existing: Memory[], messages: Message[]): Array<{ r
     {
       role: 'system',
       content: `Potentially related existing memories for duplicate/conflict/supersession checks:\n${related
-        .map(({ memory }) => `[${memory.memory_id}; ${memory.type}; ${memory.state}] ${memory.statement}`)
+        .map(
+          ({ memory }) =>
+            `[${memory.memory_id}; ${memory.type}; ${memory.state}] ${memory.statement}`
+        )
         .join('\n')}`
     }
   ]
