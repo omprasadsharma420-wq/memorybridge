@@ -2,6 +2,8 @@
 
 MemoryBridge is a Windows-first, local-first AI chat workspace and project-aware external memory system. It preserves conversations created inside the desktop app, extracts durable evidence-backed memory, and retrieves only relevant cited context for later turns. The user-selected vault—not a hosted MemoryBridge backend—is the source of truth.
 
+Handing the project to another ChatGPT or Codex task? Start with the [ChatGPT project handoff](docs/CHATGPT_HANDOFF.md); it provides the reading order, exact verification commands, access requirements, and a copy-ready instruction.
+
 ## MVP status
 
 The internal MVP implements the complete local workflow:
