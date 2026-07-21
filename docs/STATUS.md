@@ -40,21 +40,21 @@ None for the local internal MVP. A real provider credential is needed only to va
 
 All commands ran from the repository root on Windows 11 with Node 24.18.0 and npm 11.16.0.
 
-| Check                          | Result                                                                                                                                      |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm ci`                       | Passed; 488 packages installed, lockfile honored, 0 vulnerabilities reported                                                                |
-| `npm audit --audit-level=high` | Passed; 0 vulnerabilities                                                                                                                   |
-| `npm run format:check`         | Passed; all matched files use the configured Prettier style                                                                                 |
-| `npm run typecheck`            | Passed; strict TypeScript, 0 errors                                                                                                         |
-| `npm run lint`                 | Passed; ESLint, 0 warnings/errors                                                                                                           |
-| `npm run test:unit`            | Passed; 6 files, 25 tests                                                                                                                   |
-| `npm run test:integration`     | Passed; 1 file, all 5 required flows                                                                                                        |
-| `npm run test:ui`              | Passed; 1 Playwright Electron critical path                                                                                                 |
-| `npm run build`                | Passed; main, preload, and renderer production bundles generated                                                                            |
-| `npm run package:win`          | Passed; x64 NSIS installer generated                                                                                                        |
-| Installer                      | `release/MemoryBridge-0.1.0-x64-Setup.exe`, 100,845,119 bytes                                                                               |
-| Installer SHA-256              | `6939670419A2BA36D93546A4678EF2E494062B993A6B677F8ECFF6F369777754`                                                                          |
-| Authenticode                   | Not signed; no publisher certificate was supplied                                                                                           |
-| GitHub Actions                 | Workflow configured in `.github/workflows/ci.yml`; private repository created; push rejected because the OAuth token lacks `workflow` scope |
+| Check                          | Result                                                                                                                                                    |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm ci`                       | Passed; 488 packages installed, lockfile honored, 0 vulnerabilities reported                                                                              |
+| `npm audit --audit-level=high` | Passed; 0 vulnerabilities                                                                                                                                 |
+| `npm run format:check`         | Passed; all matched files use the configured Prettier style                                                                                               |
+| `npm run typecheck`            | Passed; strict TypeScript, 0 errors                                                                                                                       |
+| `npm run lint`                 | Passed; ESLint, 0 warnings/errors                                                                                                                         |
+| `npm run test:unit`            | Passed; 6 files, 25 tests                                                                                                                                 |
+| `npm run test:integration`     | Passed; 1 file, all 5 required flows                                                                                                                      |
+| `npm run test:ui`              | Passed; 1 Playwright Electron critical path                                                                                                               |
+| `npm run build`                | Passed; main, preload, and renderer production bundles generated                                                                                          |
+| `npm run package:win`          | Passed; x64 NSIS installer generated                                                                                                                      |
+| Installer                      | `release/MemoryBridge-0.1.0-x64-Setup.exe`, 100,845,119 bytes                                                                                             |
+| Installer SHA-256              | `6939670419A2BA36D93546A4678EF2E494062B993A6B677F8ECFF6F369777754`                                                                                        |
+| Authenticode                   | Not signed; no publisher certificate was supplied                                                                                                         |
+| GitHub Actions                 | Workflow published to the private repository; deterministic LF checkout is enforced for Windows; hosted results are linked in `docs/GITHUB_PUBLISHING.md` |
 
 The final marker scan found no `TODO`, `FIXME`, `mock-only`, or `unimplemented` code markers. UI `placeholder` attributes are intentional interface copy. Generated vaults, databases, logs, build output, installers, and credentials are Git-ignored.

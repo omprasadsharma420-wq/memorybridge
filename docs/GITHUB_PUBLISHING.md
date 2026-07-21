@@ -1,21 +1,16 @@
-# GitHub publishing handoff
+# GitHub publication
 
 A private repository was created successfully at:
 
 `https://github.com/omprasadsharma420-wq/memorybridge`
 
-The local `origin` remote points to that repository. The initial push was rejected because the authenticated GitHub CLI OAuth token has `repo` access but lacks GitHub's separate `workflow` scope. GitHub requires that scope when a commit creates `.github/workflows/ci.yml`.
+The local `origin` remote points to that repository, `main` tracks `origin/main`, and the complete verified history is published. The repository owner approved GitHub CLI's separate `workflow` scope before the CI workflow was pushed.
 
-The complete local `main` branch, including the CI workflow, remains intact. Do not remove the workflow to bypass the protection.
+Hosted runs are available at:
 
-When the repository owner is present, run:
+`https://github.com/omprasadsharma420-wq/memorybridge/actions`
 
-```powershell
-gh auth refresh -h github.com -s workflow
-git push -u origin main
-```
-
-The first command displays a one-time device code and opens GitHub's authorization page. After confirming the scope in the browser, the second command publishes the complete verified local branch. Then verify:
+To verify publication and the latest CI result:
 
 ```powershell
 gh repo view omprasadsharma420-wq/memorybridge --json name,isPrivate,url,defaultBranchRef
@@ -23,4 +18,4 @@ gh run list --repo omprasadsharma420-wq/memorybridge --limit 5
 git status --short --branch
 ```
 
-Expected local branch tip at this handoff is the newest commit shown by `git log -1 --oneline`. The remote must remain private.
+The local and remote branch tips must match, the default branch must be `main`, and the repository must remain private. `.gitattributes` enforces LF checkout for deterministic Prettier checks on Windows runners.
