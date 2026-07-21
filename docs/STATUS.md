@@ -53,7 +53,7 @@ All commands ran from the repository root on Windows 11 with Node 24.18.0 and np
 | `npm run build`                | Passed; main, preload, and renderer production bundles generated                                                                                          |
 | `npm run package:win`          | Passed; x64 NSIS installer generated                                                                                                                      |
 | Installer                      | `release/MemoryBridge-0.1.0-x64-Setup.exe`, 100,845,119 bytes                                                                                             |
-| Installer SHA-256              | `6939670419A2BA36D93546A4678EF2E494062B993A6B677F8ECFF6F369777754`                                                                                        |
+| Installer SHA-256              | `852D377D176BDD24E7BA464467387F73287B279A185B8D703E9E39C52E92D916`                                                                                        |
 | Authenticode                   | Not signed; no publisher certificate was supplied                                                                                                         |
 | GitHub Actions                 | Workflow published to the private repository; deterministic LF checkout is enforced for Windows; hosted results are linked in `docs/GITHUB_PUBLISHING.md` |
 
