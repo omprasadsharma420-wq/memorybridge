@@ -1,0 +1,84 @@
+{
+  "name": "memorybridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows-first, local-first AI chat workspace and project-aware external memory system",
+  "main": "./out/main/index.js",
+  "author": "MemoryBridge contributors",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run --project unit --project integration",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:ui": "npm run build && playwright test",
+    "test:coverage": "vitest run --coverage",
+    "package:win": "npm run build && electron-builder --win nsis --x64",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@playwright/test": "1.61.1",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "5.2.0",
+    "@vitest/coverage-v8": "4.1.10",
+    "electron": "43.1.1",
+    "electron-builder": "latest",
+    "electron-vite": "5.0.0",
+    "eslint": "^9.39.2",
+    "eslint-plugin-react-hooks": "latest",
+    "eslint-plugin-react-refresh": "latest",
+    "globals": "latest",
+    "prettier": "latest",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "latest",
+    "vite": "7.3.6",
+    "vitest": "4.1.10"
+  },
+  "build": {
+    "appId": "com.memorybridge.desktop",
+    "productName": "MemoryBridge",
+    "asar": true,
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "MemoryBridge-${version}-${arch}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

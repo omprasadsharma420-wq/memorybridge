@@ -1,0 +1,13 @@
+[
+  { "text": "We could use option A.", "expected": [] },
+  { "text": "We have decided to use option A.", "expected": ["decision"] },
+  { "text": "We may submit the form tomorrow.", "expected": [] },
+  { "text": "The form was submitted today.", "expected": ["completed_item"] },
+  { "text": "Do not use cloud storage.", "expected": ["instruction", "rejected_option"] },
+  { "text": "The earlier quantity is no longer correct.", "expected": ["fact"] },
+  { "text": "Remember that I prefer concise reports.", "expected": ["preference"] },
+  { "text": "The supplier may be able to change the thickness.", "expected": [] },
+  { "text": "The supplier confirmed the thickness change.", "expected": ["project_state"] },
+  { "text": "The payment failed.", "expected": [] },
+  { "text": "The payment was completed.", "expected": ["completed_item"] }
+]
