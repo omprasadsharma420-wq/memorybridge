@@ -23,7 +23,7 @@ Status captured on 2026-07-21 for MemoryBridge 0.1.0.
 - The OpenAI-compatible adapter is implemented against current documented Chat Completions streaming/JSON-schema and embeddings shapes, but no live credential/provider was supplied, so only deterministic mock operation was exercised end to end.
 - Semantic search is implemented and mock-vector tested; quality with a real embedding model depends on the user-selected compatible provider/model.
 - The generated installer is functional but uses Electron's default icon and has no Authenticode publisher certificate. Windows may display an unknown-publisher warning.
-- The GitHub Actions workflow is configured. Local equivalents passed; the first hosted run begins after repository publication.
+- The GitHub Actions workflow is configured. Local equivalents passed; the first hosted run begins after the workflow-authorized push.
 
 ## Deferred by scope
 
@@ -34,7 +34,7 @@ Status captured on 2026-07-21 for MemoryBridge 0.1.0.
 
 ## Known blockers
 
-None for the local internal MVP. A real provider credential is needed only to validate a live non-mock endpoint. A code-signing certificate is needed only for a trusted publisher signature.
+None for the local internal MVP. A real provider credential is needed only to validate a live non-mock endpoint. A code-signing certificate is needed only for a trusted publisher signature. GitHub publication requires a one-time OAuth `workflow` scope confirmation; the private remote exists, but GitHub correctly rejected the workflow-containing push from the current `repo`-only token.
 
 ## Verification results
 
@@ -54,6 +54,6 @@ All commands ran from the repository root on Windows 11 with Node 24.18.0 and np
 | Installer | `release/MemoryBridge-0.1.0-x64-Setup.exe`, 100,838,546 bytes |
 | Installer SHA-256 | `F98244701ABB22ACF1DA0F0372D3301347ACB40D43E8E805901CEE36235EA7A6` |
 | Authenticode | Not signed; no publisher certificate was supplied |
-| GitHub Actions | Workflow configured in `.github/workflows/ci.yml`; remote execution pending publication |
+| GitHub Actions | Workflow configured in `.github/workflows/ci.yml`; private repository created; push rejected because the OAuth token lacks `workflow` scope |
 
 The final marker scan found no `TODO`, `FIXME`, `mock-only`, or `unimplemented` code markers. UI `placeholder` attributes are intentional interface copy. Generated vaults, databases, logs, build output, installers, and credentials are Git-ignored.
