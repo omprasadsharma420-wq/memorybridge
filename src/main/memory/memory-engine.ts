@@ -5,10 +5,12 @@ import {
   type AppSettings,
   type ExtractionRun,
   type Memory,
+  type MemoryCandidate,
   type Message
 } from '../../shared/schemas'
 import { safeErrorCategory } from '../../shared/security'
 import type { AIProvider } from '../providers/provider'
+import { cosineSimilarity } from '../retrieval/retrieval-engine'
 import { VaultRepository } from '../storage/repository'
 import { deterministicCandidates } from './deterministic-extractor'
 import { keywordSimilarity, reconcileMemories } from './reconciler'
@@ -69,9 +71,19 @@ export class MemoryEngine {
               ]
             })
 
-      const candidates = output.candidates.filter((candidate) =>
+      let candidates = output.candidates.filter((candidate) =>
         candidate.source_message_ids.every((messageId) => sourceIds.has(messageId))
       )
+      if (settings.semanticIndexingEnabled && candidates.length > 0) {
+        candidates = await applySemanticDuplicateHints(
+          candidates,
+          existing,
+          chat.project_id,
+          provider,
+          settings.embeddingModel,
+          this.repository
+        )
+      }
       const rejectedCount = output.candidates.length - candidates.length
       const reconciliation = reconcileMemories(existing, candidates, {
         chatId,
@@ -173,6 +185,74 @@ export class MemoryEngine {
       )
     }
   }
+}
+
+async function applySemanticDuplicateHints(
+  candidates: MemoryCandidate[],
+  existing: Memory[],
+  projectId: string | null,
+  provider: AIProvider,
+  model: string,
+  repository: VaultRepository
+): Promise<MemoryCandidate[]> {
+  try {
+    const candidateVectors = await provider.embed(
+      candidates.map((candidate) => candidate.statement),
+      model
+    )
+    const existingVectors = new Map(
+      repository.getEmbeddings(model).map((embedding) => [embedding.memoryId, embedding.vector])
+    )
+    return candidates.map((candidate, index) => {
+      if (candidate.duplicate_of) return candidate
+      const vector = candidateVectors[index]
+      if (!vector) return candidate
+      const matchId = findSemanticDuplicateId(
+        candidate,
+        existing,
+        projectId,
+        vector,
+        existingVectors
+      )
+      return matchId
+        ? { ...candidate, is_new: false, duplicate_of: matchId }
+        : candidate
+    })
+  } catch {
+    return candidates
+  }
+}
+
+export function findSemanticDuplicateId(
+  candidate: MemoryCandidate,
+  existing: Memory[],
+  projectId: string | null,
+  candidateVector: number[],
+  existingVectors: Map<string, number[]>,
+  threshold = 0.96
+): string | null {
+  return (
+    existing
+      .filter(
+        (memory) =>
+          memory.project_id === projectId &&
+          memory.type === candidate.type &&
+          memory.state !== 'deleted' &&
+          sameNumbers(memory.statement, candidate.statement) &&
+          existingVectors.has(memory.memory_id)
+      )
+      .map((memory) => ({
+        memory,
+        score: cosineSimilarity(candidateVector, existingVectors.get(memory.memory_id)!)
+      }))
+      .filter(({ score }) => score >= threshold)
+      .sort((left, right) => right.score - left.score)[0]?.memory.memory_id ?? null
+  )
+}
+
+function sameNumbers(left: string, right: string): boolean {
+  const extract = (value: string): string => (value.match(/[\d,.]+/g) ?? []).join('|')
+  return extract(left) === extract(right)
 }
 
 function relatedMemoryPrompt(existing: Memory[], messages: Message[]): Array<{ role: 'system'; content: string }> {

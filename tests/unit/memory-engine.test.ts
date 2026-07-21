@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createId } from '../../src/shared/ids'
 import type { Memory } from '../../src/shared/schemas'
 import { deterministicCandidates } from '../../src/main/memory/deterministic-extractor'
+import { findSemanticDuplicateId } from '../../src/main/memory/memory-engine'
 import { findDuplicate, reconcileMemories } from '../../src/main/memory/reconciler'
 
 const source = createId('msg')
@@ -45,6 +46,26 @@ describe('memory extraction and reconciliation', () => {
     const second = reconcileMemories(first.memories, [duplicate], { chatId, projectId, now: new Date().toISOString() })
     expect(second.memories).toHaveLength(1)
     expect(second.memories[0]?.source_message_ids).toEqual(expect.arrayContaining([source, anotherSource]))
+  })
+
+  it('uses semantic vectors to control paraphrased duplicates when available', () => {
+    const existing = baseMemory({
+      type: 'preference',
+      statement: 'Reports should be concise and direct.'
+    })
+    const candidate = deterministicCandidates(
+      [{ role: 'user', messageId: source, content: 'Remember that I prefer brief direct reports.' }],
+      []
+    )[0]!
+    expect(
+      findSemanticDuplicateId(
+        candidate,
+        [existing],
+        projectId,
+        [1, 0, 0],
+        new Map([[existing.memory_id, [1, 0, 0]]])
+      )
+    ).toBe(existing.memory_id)
   })
 
   it('supersedes an older conflicting decision while preserving both records', () => {

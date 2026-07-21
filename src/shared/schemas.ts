@@ -57,7 +57,8 @@ export const messageSchema = z.object({
   status: messageStatusSchema,
   sequence: z.number().int().nonnegative(),
   error_category: z.string().max(120).optional(),
-  retrieved_memory_ids: z.array(memoryIdSchema).default([])
+  retrieved_memory_ids: z.array(memoryIdSchema).default([]),
+  retrieved_context_ids: z.array(z.union([memoryIdSchema, messageIdSchema])).default([])
 })
 
 export const memoryTypeSchema = z.enum([

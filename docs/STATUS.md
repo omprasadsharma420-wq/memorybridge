@@ -13,10 +13,10 @@ Status captured on 2026-07-21 for MemoryBridge 0.1.0.
 - Deterministic offline mock provider with chat, structured extraction, embeddings, failure, timeout, invalid-output, and interrupted-stream modes.
 - Configurable OpenAI-compatible chat-completions streaming, strict JSON-schema structured output, embeddings, retries/timeouts, and connection check.
 - Electron `safeStorage` API-key encryption outside the vault, hidden saved values, removal, and redaction.
-- Fixed memory taxonomy, significance rules, source-ID validation, extraction-run records, duplicate control, supersession, commitment completion, rejected options, disputed conflicts, and confirmed-memory protection.
-- Memory ledger with type/state/confidence/project/source excerpt/dates/relationships and confirm, correct, reject, delete, pin, merge, supersede, and open-source actions.
-- Rebuildable Node SQLite/FTS5 index, conservative rollback journaling, corrupted-index parking/rebuild, keyword filters, optional vectors, cosine similarity, documented hybrid ranking, context budgets, context injection, and visible citations.
-- Content-safe structured logs, content-free diagnostic export, privacy/security documentation, package configuration, and Windows CI.
+- Fixed memory taxonomy, significance rules, source-ID validation, extraction-run records, lexical and optional semantic duplicate control, supersession, commitment completion, rejected options, disputed conflicts, and confirmed-memory protection.
+- Memory ledger with type/state/confidence/project/source excerpt/dates/relationships and confirm, correct, reject, delete, pin, merge, supersede, and exact highlighted source-message actions.
+- Rebuildable Node SQLite/FTS5 index, conservative rollback journaling, corrupted-index parking/rebuild, project/chat/type/state/date/history search filters, optional vectors, cosine similarity, documented relevance-gated hybrid ranking, bounded transcript fallback, context budgets, context injection, and visible citations.
+- Content-safe structured logs, diagnostics with bounded safe recent events, privacy/security documentation, package configuration, and Windows CI.
 
 ## Partially completed / externally dependent
 
@@ -46,13 +46,13 @@ All commands ran from the repository root on Windows 11 with Node 24.18.0 and np
 | `npm audit --audit-level=high` | Passed; 0 vulnerabilities |
 | `npm run typecheck` | Passed; strict TypeScript, 0 errors |
 | `npm run lint` | Passed; ESLint, 0 warnings/errors |
-| `npm run test:unit` | Passed; 6 files, 23 tests |
+| `npm run test:unit` | Passed; 6 files, 25 tests |
 | `npm run test:integration` | Passed; 1 file, all 5 required flows |
 | `npm run test:ui` | Passed; 1 Playwright Electron critical path |
 | `npm run build` | Passed; main, preload, and renderer production bundles generated |
 | `npm run package:win` | Passed; x64 NSIS installer generated |
-| Installer | `release/MemoryBridge-0.1.0-x64-Setup.exe`, 100,838,546 bytes |
-| Installer SHA-256 | `F98244701ABB22ACF1DA0F0372D3301347ACB40D43E8E805901CEE36235EA7A6` |
+| Installer | `release/MemoryBridge-0.1.0-x64-Setup.exe`, 100,843,015 bytes |
+| Installer SHA-256 | `67C37E637EAF2759066C1F37E561147EDA88005D0003CF4AD7E675D7FFC6E84E` |
 | Authenticode | Not signed; no publisher certificate was supplied |
 | GitHub Actions | Workflow configured in `.github/workflows/ci.yml`; private repository created; push rejected because the OAuth token lacks `workflow` scope |
 

@@ -15,7 +15,7 @@ Candidates include type, statement, source IDs, confidence, entities/tags, dupli
 ## Reconciliation
 
 1. Exact normalized statement/type/project matches merge provenance and confidence.
-2. High keyword/entity overlap controls likely duplicates.
+2. High keyword/entity overlap controls likely duplicates; when embeddings are enabled, very high cosine similarity can also identify paraphrased duplicates of the same type and project.
 3. Explicit or strongly inferred updated quantities/“no longer” language links the new memory to the old one and marks the old record superseded.
 4. A related completed item resolves an active commitment while preserving both records and evidence.
 5. Rejected options enter `rejected` state and default retrieval excludes them.
@@ -41,7 +41,7 @@ confidence × (
 )
 ```
 
-Global memories receive partial affinity; a selected project receives full affinity. Results must clear a minimum score, are capped by the maximum-memory setting, then fit the character budget. Every injected item includes type/state, project, source chat title, source IDs, excerpt, timestamp, and score. The assistant message records which memory IDs were supplied.
+Global memories receive partial affinity; a selected project receives full affinity. Project, recency, type, confirmation, and pinning can only boost an item that first has lexical or semantic relevance. Results must clear a minimum score, are capped by the maximum-memory setting, then fit the character budget. If no structured memory qualifies, prior messages outside the current chat are searched as a transcript fallback under the same item and character limits. Every injected item includes its kind, project, source chat title, exact source ID, excerpt, timestamp, and score. The assistant message records all supplied context IDs and separately records structured memory IDs for compatibility.
 
 ## Known limitations
 

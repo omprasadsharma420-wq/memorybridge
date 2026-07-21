@@ -39,7 +39,9 @@ export interface SearchResult {
 }
 
 export interface RetrievedContextItem {
-  memoryId: string
+  contextId: string
+  kind: 'memory' | 'transcript'
+  memoryId: string | null
   statement: string
   memoryType: string
   projectId: string | null
@@ -100,6 +102,8 @@ export const searchInputSchema = z.object({
   chatId: chatIdSchema.optional(),
   memoryType: memoryTypeSchema.optional(),
   state: memoryStateSchema.optional(),
+  fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   includeHistory: z.boolean().default(false),
   limit: z.number().int().min(1).max(100).default(30)
 })

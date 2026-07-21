@@ -11,11 +11,11 @@ export class RetrievalEngine {
     query: string,
     projectId: string | null,
     settings: AppSettings,
-    provider: AIProvider
+    provider: AIProvider,
+    excludeChatId?: string
   ): Promise<RetrievedContextItem[]> {
     if (settings.maximumRetrievedMemories === 0 || settings.retrievalCharacterBudget === 0) return []
     const memories = this.repository.listActiveMemories(projectId)
-    if (memories.length === 0) return []
     let queryVector: number[] | null = null
     let vectors = new Map<string, number[]>()
     if (settings.semanticIndexingEnabled) {
@@ -49,9 +49,11 @@ export class RetrievalEngine {
       const sources = messages.filter((message) => memory.source_message_ids.includes(message.message_id))
       const sourceExcerpt = excerpt(sources.map((message) => message.content).join(' '), 320)
       const cost = memory.statement.length + sourceExcerpt.length
-      if (items.length > 0 && usedCharacters + cost > settings.retrievalCharacterBudget) continue
+      if (usedCharacters + cost > settings.retrievalCharacterBudget) continue
       const chat = chats.get(memory.chat_id)
       items.push({
+        contextId: memory.memory_id,
+        kind: 'memory',
         memoryId: memory.memory_id,
         statement: memory.statement,
         memoryType: memory.type,
@@ -66,6 +68,44 @@ export class RetrievalEngine {
         score
       })
       usedCharacters += cost
+    }
+
+    if (items.length === 0) {
+      const transcriptResults = this.repository
+        .search({
+          query,
+          projectId: projectId ?? undefined,
+          includeHistory: false,
+          limit: Math.max(12, settings.maximumRetrievedMemories * 3)
+        })
+        .filter(
+          (result) =>
+            result.kind === 'message' &&
+            result.chatId !== excludeChatId &&
+            !items.some((item) => item.sourceMessageIds.includes(result.id))
+        )
+      for (const result of transcriptResults) {
+        if (items.length >= settings.maximumRetrievedMemories) break
+        const cost = result.excerpt.length * 2
+        if (usedCharacters + cost > settings.retrievalCharacterBudget) continue
+        items.push({
+          contextId: result.id,
+          kind: 'transcript',
+          memoryId: null,
+          statement: result.excerpt,
+          memoryType: 'transcript_excerpt',
+          projectId: result.projectId,
+          projectName: result.projectId ? projects.get(result.projectId)?.name ?? null : null,
+          sourceChatId: result.chatId,
+          sourceChatTitle: result.title,
+          sourceMessageIds: [result.id],
+          sourceExcerpt: result.excerpt,
+          timestamp: result.createdAt,
+          state: 'source',
+          score: result.score
+        })
+        usedCharacters += cost
+      }
     }
     return items
   }
@@ -87,6 +127,7 @@ export function hybridScore(
   const keywordScore = queryWords.size ? intersection / queryWords.size : 0
   const exactPhrase = normalizedQuery.length > 4 && normalizedStatement.includes(normalizedQuery) ? 1 : 0
   const semantic = queryVector && memoryVector ? Math.max(0, cosineSimilarity(queryVector, memoryVector)) : 0
+  if (keywordScore === 0 && exactPhrase === 0 && semantic < 0.2) return 0
   const project = projectId && memory.project_id === projectId ? 1 : memory.project_id === null ? 0.3 : 0
   const confirmation = memory.user_confirmed || memory.state === 'confirmed' ? 1 : 0
   const pinned = memory.pinned ? 1 : 0

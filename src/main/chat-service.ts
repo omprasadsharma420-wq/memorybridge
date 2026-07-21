@@ -44,7 +44,8 @@ export class ChatService {
       model: settings.chatModel,
       status: 'complete',
       sequence: await this.repository.nextSequence(chatId),
-      retrieved_memory_ids: []
+      retrieved_memory_ids: [],
+      retrieved_context_ids: []
     }
 
     await this.repository.appendMessage(userMessage)
@@ -79,7 +80,8 @@ export class ChatService {
       userMessage.content,
       chat.project_id,
       settings,
-      provider
+      provider,
+      chat.chat_id
     )
     const now = new Date().toISOString()
     let assistantMessage: Message = {
@@ -93,7 +95,10 @@ export class ChatService {
       model: settings.chatModel,
       status: 'pending',
       sequence: await this.repository.nextSequence(chat.chat_id),
-      retrieved_memory_ids: retrievedContext.map((item) => item.memoryId)
+      retrieved_memory_ids: retrievedContext.flatMap((item) =>
+        item.memoryId ? [item.memoryId] : []
+      ),
+      retrieved_context_ids: retrievedContext.map((item) => item.contextId)
     }
     await this.repository.appendMessage(assistantMessage)
     this.onStream(assistantMessage)

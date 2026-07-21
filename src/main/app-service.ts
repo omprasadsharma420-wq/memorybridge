@@ -129,11 +129,41 @@ export class AppService {
   }
 
   async sendMessage(input: SendMessageInput): Promise<ChatTurnResult> {
-    return this.chat.sendMessage(input.chatId, input.content)
+    const started = Date.now()
+    try {
+      const result = await this.chat.sendMessage(input.chatId, input.content)
+      await this.log({
+        event: 'chat.turn_finished',
+        category: result.assistantMessage.error_category,
+        provider: result.assistantMessage.provider,
+        model: result.assistantMessage.model,
+        chatId: input.chatId,
+        messageId: result.assistantMessage.message_id,
+        durationMs: Date.now() - started
+      })
+      return result
+    } catch (error) {
+      await this.log({
+        event: 'chat.turn_failed',
+        category: safeErrorCategory(error),
+        chatId: input.chatId,
+        durationMs: Date.now() - started
+      })
+      throw error
+    }
   }
 
   async retryMessage(input: RetryMessageInput): Promise<ChatTurnResult> {
-    return this.chat.retryMessage(input.chatId, input.userMessageId)
+    const result = await this.chat.retryMessage(input.chatId, input.userMessageId)
+    await this.log({
+      event: 'chat.retry_finished',
+      category: result.assistantMessage.error_category,
+      provider: result.assistantMessage.provider,
+      model: result.assistantMessage.model,
+      chatId: input.chatId,
+      messageId: result.assistantMessage.message_id
+    })
+    return result
   }
 
   stopGeneration(chatId: string): void {
@@ -225,6 +255,7 @@ export class AppService {
         schemaVersion: vaultStatus.manifest?.schema_version ?? null
       },
       hasStoredApiKey: await this.credentials.has(),
+      recentSafeEvents: await this.logger.recent(50),
       excludes: ['transcripts', 'message content', 'memory statements', 'credentials', 'vault paths']
     })
     return { path: result.filePath }
@@ -272,6 +303,14 @@ export class AppService {
       timeoutMs: this.settings.requestTimeoutMs,
       maxRetries: this.settings.maxRetries
     })
+  }
+
+  private async log(event: Parameters<SafeLogger['write']>[0]): Promise<void> {
+    try {
+      await this.logger.write(event)
+    } catch {
+      // Logging is deliberately non-blocking and contains no conversation content.
+    }
   }
 
   private get repo(): VaultRepository {

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { createId } from '../../src/shared/ids'
 import type { Memory } from '../../src/shared/schemas'
 import { cosineSimilarity, hybridScore } from '../../src/main/retrieval/retrieval-engine'
+import { RetrievalEngine } from '../../src/main/retrieval/retrieval-engine'
+import { createHarness } from '../helpers'
 
 const now = new Date().toISOString()
 const projectId = createId('project')
@@ -24,6 +26,31 @@ describe('hybrid retrieval ranking', () => {
     expect(cosineSimilarity([1, 0], [1, 0])).toBe(1)
     expect(cosineSimilarity([1, 0], [0, 1])).toBe(0)
     expect(cosineSimilarity([], [])).toBe(0)
+  })
+
+  it('falls back to cited transcript excerpts when structured memories are insufficient', async () => {
+    const harness = await createHarness({ memoryExtractionEnabled: false })
+    try {
+      const project = await harness.repository.createProject('Materials research')
+      const sourceChat = await harness.repository.createChat(project.project_id)
+      await harness.chatService.sendMessage(
+        sourceChat.chat_id,
+        'The cobalt findings are archived in the supplier research folder.'
+      )
+      const currentChat = await harness.repository.createChat(project.project_id)
+      const items = await new RetrievalEngine(harness.repository).retrieve(
+        'What were the cobalt findings?',
+        project.project_id,
+        harness.settings,
+        harness.provider,
+        currentChat.chat_id
+      )
+      expect(items.some((item) => item.kind === 'transcript')).toBe(true)
+      expect(items.every((item) => item.sourceChatId !== currentChat.chat_id)).toBe(true)
+      expect(items.find((item) => item.kind === 'transcript')?.sourceMessageIds[0]).toMatch(/^msg_/)
+    } finally {
+      await harness.cleanup()
+    }
   })
 })
 

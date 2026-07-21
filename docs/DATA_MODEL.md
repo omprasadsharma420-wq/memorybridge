@@ -45,7 +45,8 @@ Each JSONL line is a complete validated message snapshot:
   "model": "model-id",
   "status": "streaming",
   "sequence": 1,
-  "retrieved_memory_ids": []
+  "retrieved_memory_ids": [],
+  "retrieved_context_ids": []
 }
 ```
 
@@ -77,4 +78,4 @@ SQLite uses `journal_mode=DELETE`, `synchronous=FULL`, foreign keys, a 5-second 
 
 ## Migration strategy
 
-The current file and index schema version is 1. Index migrations are recorded in `migration_state`; derived indexes can be cleared and rebuilt. Future authoritative schema changes must add backwards-compatible parsing or a numbered, tested vault migration that preserves originals and records completion in the vault `migrations/` area. Never reinterpret or destructively rewrite a transcript without an explicit migration.
+The current authoritative vault file schema version is 1 and the rebuildable SQLite index schema version is 2. Index version 2 adds `retrieved_context_ids` to message projections; opening a version 1 index adds the nullable/defaulted projection column without rewriting transcripts. Index migrations are recorded in `migration_state`; derived indexes can be cleared and rebuilt. Future authoritative schema changes must add backwards-compatible parsing or a numbered, tested vault migration that preserves originals and records completion in the vault `migrations/` area. Never reinterpret or destructively rewrite a transcript without an explicit migration.

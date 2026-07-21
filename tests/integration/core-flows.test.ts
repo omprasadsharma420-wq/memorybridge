@@ -30,6 +30,16 @@ describe('MemoryBridge core flows', () => {
       expect(memories[0]?.source_message_ids).toHaveLength(1)
       const results = harness.repository.search({ query: 'Electron', memoryType: 'decision', includeHistory: false, limit: 10 })
       expect(results.some((result) => result.kind === 'memory' && result.chatId === chat.chat_id)).toBe(true)
+      expect(results.every((result) => result.kind === 'memory')).toBe(true)
+      expect(
+        harness.repository.search({
+          query: 'Electron',
+          memoryType: 'decision',
+          fromDate: '2999-01-01',
+          includeHistory: false,
+          limit: 10
+        })
+      ).toHaveLength(0)
       const confirmed = await harness.memoryEngine.applyAction(memories[0]!.memory_id, { kind: 'confirm' })
       expect(confirmed.find((memory) => memory.memory_id === memories[0]!.memory_id)?.user_confirmed).toBe(true)
       const corrected = await harness.memoryEngine.applyAction(memories[0]!.memory_id, {

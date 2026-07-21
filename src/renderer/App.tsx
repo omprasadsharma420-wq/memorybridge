@@ -19,6 +19,8 @@ export function App(): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [contextUsed, setContextUsed] = useState<RetrievedContextItem[]>([])
+  const [contextExpanded, setContextExpanded] = useState(false)
+  const [sourceMessageId, setSourceMessageId] = useState<string | null>(null)
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const messagesEnd = useRef<HTMLDivElement>(null)
@@ -58,6 +60,14 @@ export function App(): React.JSX.Element {
     messagesEnd.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  useEffect(() => {
+    if (!sourceMessageId) return
+    document.getElementById(`message-${sourceMessageId}`)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center'
+    })
+  }, [messages, sourceMessageId])
+
   if (!state) return <LoadingScreen />
   if (!state.vault.connected && !state.vault.path) {
     return <VaultWelcome onState={setState} onError={setNotice} notice={notice} />
@@ -69,9 +79,11 @@ export function App(): React.JSX.Element {
     return chat.project_id === selectedProjectId
   })
 
-  const selectChat = (chatId: string): void => {
+  const selectChat = (chatId: string, messageId?: string): void => {
     setSelectedChatId(chatId)
+    setSourceMessageId(messageId ?? null)
     setContextUsed([])
+    setContextExpanded(false)
   }
 
   const createChat = async (): Promise<void> => {
@@ -137,6 +149,11 @@ export function App(): React.JSX.Element {
         vault={state.vault}
         onProject={setSelectedProjectId}
         onChat={selectChat}
+        onClear={() => {
+          setSelectedChatId(null)
+          setSourceMessageId(null)
+          setContextUsed([])
+        }}
         onNewChat={() => void createChat()}
         onNewProject={() => setProjectDialogOpen(true)}
         onPanel={setPanel}
@@ -162,9 +179,10 @@ export function App(): React.JSX.Element {
                 <MessageCard
                   key={message.message_id}
                   message={message}
-                  citedMemories={memories.filter((memory) =>
-                    message.retrieved_memory_ids.includes(memory.memory_id)
-                  )}
+                  retrievedCount={
+                    message.retrieved_context_ids.length || message.retrieved_memory_ids.length
+                  }
+                  highlighted={message.message_id === sourceMessageId}
                   onOpenMemory={() => setPanel('memory')}
                   onRetry={
                     message.role === 'assistant' && ['failed', 'interrupted', 'cancelled'].includes(message.status)
@@ -193,10 +211,26 @@ export function App(): React.JSX.Element {
               <div ref={messagesEnd} />
             </div>
             {contextUsed.length > 0 && (
-              <button className="context-strip" onClick={() => setPanel('memory')}>
-                <span>Bridge context</span>
-                {contextUsed.length} cited {contextUsed.length === 1 ? 'memory' : 'memories'} supplied
-              </button>
+              <div className="context-wrap">
+                <button className="context-strip" onClick={() => setContextExpanded((value) => !value)}>
+                  <span>Bridge context</span>
+                  {contextUsed.length} cited context {contextUsed.length === 1 ? 'item' : 'items'} supplied
+                </button>
+                {contextExpanded && (
+                  <div className="context-details">
+                    {contextUsed.map((item) => (
+                      <button
+                        key={item.contextId}
+                        onClick={() => selectChat(item.sourceChatId, item.sourceMessageIds[0])}
+                      >
+                        <span>{item.kind === 'memory' ? item.memoryType : 'transcript excerpt'}</span>
+                        <b>{item.statement}</b>
+                        <small>↗ {item.sourceChatTitle} · exact source</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
             <Composer
               disabled={!state.vault.connected}
@@ -347,7 +381,8 @@ function Sidebar(props: {
   selectedChatId: string | null
   vault: VaultStatus
   onProject: (id: string | null | 'all') => void
-  onChat: (id: string) => void
+  onChat: (id: string, messageId?: string) => void
+  onClear: () => void
   onNewChat: () => void
   onNewProject: () => void
   onPanel: (panel: Panel) => void
@@ -370,7 +405,7 @@ function Sidebar(props: {
           </button>
         ))}
       </nav>
-      <div className="nav-label chat-label"><span>Recent</span></div>
+      <div className="nav-label chat-label"><span>Recent</span>{props.selectedChatId && <button className="clear-chat" onClick={props.onClear}>Clear</button>}</div>
       <div className="chat-list">
         {props.chats.map((chat) => (
           <button key={chat.chat_id} className={props.selectedChatId === chat.chat_id ? 'active' : ''} onClick={() => props.onChat(chat.chat_id)}>
@@ -411,15 +446,15 @@ function ChatHeader({ chat, projects, onUpdated }: { chat: Chat; projects: Proje
   )
 }
 
-function MessageCard({ message, citedMemories, onOpenMemory, onRetry }: { message: Message; citedMemories: Memory[]; onOpenMemory: () => void; onRetry?: () => void }): React.JSX.Element {
+function MessageCard({ message, retrievedCount, highlighted, onOpenMemory, onRetry }: { message: Message; retrievedCount: number; highlighted: boolean; onOpenMemory: () => void; onRetry?: () => void }): React.JSX.Element {
   return (
-    <article className={`message ${message.role}`} data-status={message.status}>
+    <article id={`message-${message.message_id}`} className={`message ${message.role} ${highlighted ? 'source-highlight' : ''}`} data-status={message.status}>
       <div className="avatar">{message.role === 'user' ? 'You' : 'MB'}</div>
       <div className="bubble">
         <div className="message-meta"><b>{message.role === 'user' ? 'You' : 'MemoryBridge'}</b><time>{formatTime(message.created_at)}</time></div>
         <p>{message.content || (message.status === 'pending' ? 'Preparing a response…' : '…')}</p>
         {message.role === 'assistant' && message.status === 'streaming' && <span className="stream-cursor" />}
-        {citedMemories.length > 0 && <button className="citation-button" onClick={onOpenMemory}>↗ Used {citedMemories.length} cited {citedMemories.length === 1 ? 'memory' : 'memories'}</button>}
+        {retrievedCount > 0 && <button className="citation-button" onClick={onOpenMemory}>↗ Used {retrievedCount} cited context {retrievedCount === 1 ? 'item' : 'items'}</button>}
         {!['complete', 'streaming', 'pending'].includes(message.status) && (
           <div className="message-state"><span>{message.status}</span>{message.content && ' · partial response preserved'}{onRetry && <button onClick={onRetry}>Retry</button>}</div>
         )}
@@ -447,7 +482,7 @@ function Composer({ disabled, busy, onSend, onStop }: { disabled: boolean; busy:
 }
 
 function Inspector({ panel, setPanel, state, memories, selectedChatId, selectedProjectId, onMemories, onSelectChat, onSettings, onProjectUpdated, onBootstrap, onNotice }: {
-  panel: Panel; setPanel: (panel: Panel) => void; state: BootstrapState; memories: Memory[]; selectedChatId: string | null; selectedProjectId: string | null | 'all'; onMemories: (memories: Memory[]) => void; onSelectChat: (id: string) => void; onSettings: (settings: AppSettings) => void; onProjectUpdated: (project: Project) => void; onBootstrap: (state: BootstrapState) => void; onNotice: (message: string) => void
+  panel: Panel; setPanel: (panel: Panel) => void; state: BootstrapState; memories: Memory[]; selectedChatId: string | null; selectedProjectId: string | null | 'all'; onMemories: (memories: Memory[]) => void; onSelectChat: (id: string, messageId?: string) => void; onSettings: (settings: AppSettings) => void; onProjectUpdated: (project: Project) => void; onBootstrap: (state: BootstrapState) => void; onNotice: (message: string) => void
 }): React.JSX.Element {
   return (
     <aside className="inspector">
@@ -457,13 +492,13 @@ function Inspector({ panel, setPanel, state, memories, selectedChatId, selectedP
         <button className={panel === 'settings' ? 'active' : ''} onClick={() => setPanel('settings')}>Settings</button>
       </div>
       {panel === 'memory' && <MemoryPanel memories={memories} selectedChatId={selectedChatId} selectedProjectId={selectedProjectId} projects={state.projects} chats={state.chats} onMemories={onMemories} onSelectChat={onSelectChat} />}
-      {panel === 'search' && <SearchPanel projects={state.projects} onSelectChat={onSelectChat} />}
+      {panel === 'search' && <SearchPanel projects={state.projects} chats={state.chats} onSelectChat={onSelectChat} />}
       {panel === 'settings' && <SettingsPanel state={state} selectedChatId={selectedChatId} onSettings={onSettings} onProjectUpdated={onProjectUpdated} onBootstrap={onBootstrap} onNotice={onNotice} />}
     </aside>
   )
 }
 
-function MemoryPanel({ memories, selectedChatId, selectedProjectId, projects, chats, onMemories, onSelectChat }: { memories: Memory[]; selectedChatId: string | null; selectedProjectId: string | null | 'all'; projects: Project[]; chats: Chat[]; onMemories: (items: Memory[]) => void; onSelectChat: (id: string) => void }): React.JSX.Element {
+function MemoryPanel({ memories, selectedChatId, selectedProjectId, projects, chats, onMemories, onSelectChat }: { memories: Memory[]; selectedChatId: string | null; selectedProjectId: string | null | 'all'; projects: Project[]; chats: Chat[]; onMemories: (items: Memory[]) => void; onSelectChat: (id: string, messageId?: string) => void }): React.JSX.Element {
   const [scope, setScope] = useState<'chat' | 'project' | 'all'>('chat')
   const visible = memories
     .filter((memory) => {
@@ -495,7 +530,7 @@ function MemoryCard({ memory, allMemories, project, chat, act, onSelectChat }: {
   project?: Project
   chat?: Chat
   act: (input: Parameters<typeof window.memoryBridge.memoryAction>[0]) => Promise<void>
-  onSelectChat: (id: string) => void
+  onSelectChat: (id: string, messageId?: string) => void
 }): React.JSX.Element {
   const [editing, setEditing] = useState(false)
   const [statement, setStatement] = useState(memory.statement)
@@ -525,7 +560,7 @@ function MemoryCard({ memory, allMemories, project, chat, act, onSelectChat }: {
       ) : <p>{memory.statement}</p>}
       <div className="confidence"><i style={{ width: `${memory.confidence * 100}%` }} /><span>{Math.round(memory.confidence * 100)}%</span></div>
       <blockquote>“{sourceExcerpt.length > 180 ? `${sourceExcerpt.slice(0, 179)}…` : sourceExcerpt}”</blockquote>
-      <button className="source" onClick={() => onSelectChat(memory.chat_id)}>↗ {project?.name ?? 'Unassigned'} · {chat?.title ?? 'Source chat'}</button>
+      <button className="source" onClick={() => onSelectChat(memory.chat_id, memory.source_message_ids[0])}>↗ {project?.name ?? 'Unassigned'} · {chat?.title ?? 'Source chat'} · exact message</button>
       <div className="memory-dates"><span>Updated {new Date(memory.updated_at).toLocaleDateString()}</span>{memory.superseded_by && <span>Superseded by {memory.superseded_by.slice(0, 16)}…</span>}</div>
       <div className="memory-actions">
         {!memory.user_confirmed && <button onClick={() => void act({ memoryId: memory.memory_id, action: 'confirm' })}>Confirm</button>}
@@ -546,21 +581,50 @@ function MemoryCard({ memory, allMemories, project, chat, act, onSelectChat }: {
   )
 }
 
-function SearchPanel({ projects, onSelectChat }: { projects: Project[]; onSelectChat: (id: string) => void }): React.JSX.Element {
+function SearchPanel({ projects, chats, onSelectChat }: { projects: Project[]; chats: Chat[]; onSelectChat: (id: string, messageId?: string) => void }): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [projectId, setProjectId] = useState<string>('')
+  const [chatId, setChatId] = useState('')
+  const [memoryType, setMemoryType] = useState<Memory['type'] | ''>('')
+  const [memoryState, setMemoryState] = useState<Memory['state'] | ''>('')
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
+  const [includeHistory, setIncludeHistory] = useState(false)
   const [results, setResults] = useState<SearchResult[]>([])
   const search = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
     if (!query.trim()) return
-    setResults(await window.memoryBridge.search({ query, projectId: projectId || undefined, includeHistory: false, limit: 40 }))
+    setResults(
+      await window.memoryBridge.search({
+        query,
+        projectId: projectId || undefined,
+        chatId: chatId || undefined,
+        memoryType: memoryType || undefined,
+        state: memoryState || undefined,
+        fromDate: fromDate || undefined,
+        toDate: toDate || undefined,
+        includeHistory,
+        limit: 40
+      })
+    )
   }
   return (
     <div className="panel-content">
       <div className="panel-heading"><div><p className="eyebrow">LOCAL FTS5</p><h2>Search archive</h2></div></div>
-      <form className="search-form" onSubmit={(event) => void search(event)}><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search messages and memories" /><select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">All projects</option>{projects.map((project) => <option key={project.project_id} value={project.project_id}>{project.name}</option>)}</select></form>
+      <form className="search-form" onSubmit={(event) => void search(event)}>
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search messages and memories" />
+        <div className="search-filter-grid">
+          <select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">All projects</option>{projects.map((project) => <option key={project.project_id} value={project.project_id}>{project.name}</option>)}</select>
+          <select value={chatId} onChange={(event) => setChatId(event.target.value)}><option value="">All chats</option>{chats.filter((chat) => !projectId || chat.project_id === projectId).map((chat) => <option key={chat.chat_id} value={chat.chat_id}>{chat.title}</option>)}</select>
+          <select aria-label="Memory type" value={memoryType} onChange={(event) => setMemoryType(event.target.value as Memory['type'] | '')}><option value="">All memory types</option>{['decision', 'agreement', 'completed_item', 'fact', 'preference', 'instruction', 'commitment', 'open_question', 'project_state', 'rejected_option'].map((type) => <option key={type} value={type}>{type.replace('_', ' ')}</option>)}</select>
+          <select aria-label="Memory state" value={memoryState} onChange={(event) => setMemoryState(event.target.value as Memory['state'] | '')}><option value="">All active states</option>{['active', 'confirmed', 'completed', 'superseded', 'rejected', 'disputed'].map((state) => <option key={state} value={state}>{state}</option>)}</select>
+          <label>From<input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
+          <label>Through<input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
+        </div>
+        <div className="search-history-row"><label><input type="checkbox" checked={includeHistory} onChange={(event) => setIncludeHistory(event.target.checked)} /> Include rejected and superseded history</label><button type="submit">Search</button></div>
+      </form>
       <div className="search-results">
-        {results.map((result) => <button key={`${result.kind}-${result.id}`} onClick={() => onSelectChat(result.chatId)}><span className="result-kind">{result.kind}</span><b>{result.title}</b><p>{result.excerpt}</p>{result.memoryType && <small>{result.memoryType} · {result.state}</small>}</button>)}
+        {results.map((result) => <button key={`${result.kind}-${result.id}`} onClick={() => onSelectChat(result.chatId, result.sourceMessageIds[0])}><span className="result-kind">{result.kind}</span><b>{result.title}</b><p>{result.excerpt}</p>{result.memoryType && <small>{result.memoryType} · {result.state}</small>}</button>)}
         {results.length === 0 && <PanelEmpty icon="⌕" title="Search stays on your device" copy="Keyword search works without an API key. Historical and rejected memories are hidden by default." />}
       </div>
     </div>

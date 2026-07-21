@@ -25,7 +25,7 @@ describe('vault and repository', () => {
       const assistant = {
         message_id: createId('msg'), chat_id: chat.chat_id, role: 'assistant' as const, content: 'part',
         created_at: now, updated_at: now, provider: 'mock', model: 'mock', status: 'streaming' as const,
-        sequence: 0, retrieved_memory_ids: []
+        sequence: 0, retrieved_memory_ids: [], retrieved_context_ids: []
       }
       await harness.repository.appendMessage(assistant)
       await harness.repository.appendMessage({ ...assistant, content: 'partial response', updated_at: new Date().toISOString() })

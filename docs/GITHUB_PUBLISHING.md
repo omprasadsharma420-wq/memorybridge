@@ -15,7 +15,7 @@ gh auth refresh -h github.com -s workflow
 git push -u origin main
 ```
 
-The first command displays a one-time device code and opens GitHub's authorization page. After confirming the scope in the browser, the second command publishes both verified commits. Then verify:
+The first command displays a one-time device code and opens GitHub's authorization page. After confirming the scope in the browser, the second command publishes the complete verified local branch. Then verify:
 
 ```powershell
 gh repo view omprasadsharma420-wq/memorybridge --json name,isPrivate,url,defaultBranchRef

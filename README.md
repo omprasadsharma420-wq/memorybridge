@@ -14,9 +14,10 @@ The internal MVP implements the complete local workflow:
 - Configure an OpenAI-compatible endpoint for streaming chat, JSON-schema extraction, and embeddings.
 - Extract validated decisions, agreements, completed items, facts, preferences, instructions, commitments, open questions, project states, and rejected options with exact message provenance.
 - Reconcile duplicates, supersession, completion, rejection, and disputed changes without destroying history or silently replacing confirmed memory.
-- Search chats/messages/memories offline with SQLite FTS5; optionally add embeddings and hybrid ranking.
-- Review, confirm, correct, reject, pin, merge, delete, or supersede memories and open the source chat.
-- Rebuild derived indexes and export diagnostics that exclude transcripts, memory statements, vault paths, and credentials.
+- Search chats/messages/memories offline with project, chat, type, state, date, and history filters; optionally add embeddings and hybrid ranking.
+- Fall back to relevant prior transcript excerpts when no structured memory matches, while enforcing relevance and context-size gates.
+- Review, confirm, correct, reject, pin, merge, delete, or supersede memories and jump to the highlighted source message.
+- Rebuild derived indexes and export diagnostics with safe recent events while excluding transcripts, memory statements, vault paths, and credentials.
 
 MemoryBridge does not scrape ChatGPT or Claude, read browser storage, use consumer-service internals, provide cloud sync, or treat a ChatGPT subscription as API access.
 

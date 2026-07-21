@@ -13,7 +13,7 @@ import type { SearchInput, SearchResult } from '../../shared/contracts'
 import { excerpt } from '../../shared/text'
 import { ensureDirectory } from './file-utils'
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 export class IndexDatabase {
   private database: DatabaseSync | null = null
@@ -97,18 +97,20 @@ export class IndexDatabase {
       this.db
         .prepare(
           `INSERT INTO messages
-             (message_id, chat_id, role, content, created_at, updated_at, provider, model, status, sequence, error_category, retrieved_memory_ids)
+             (message_id, chat_id, role, content, created_at, updated_at, provider, model, status, sequence, error_category, retrieved_memory_ids, retrieved_context_ids)
            VALUES
-             (@message_id, @chat_id, @role, @content, @created_at, @updated_at, @provider, @model, @status, @sequence, @error_category, @retrieved_memory_ids)
+             (@message_id, @chat_id, @role, @content, @created_at, @updated_at, @provider, @model, @status, @sequence, @error_category, @retrieved_memory_ids, @retrieved_context_ids)
            ON CONFLICT(message_id) DO UPDATE SET
              content=excluded.content, updated_at=excluded.updated_at, provider=excluded.provider,
              model=excluded.model, status=excluded.status, sequence=excluded.sequence,
-             error_category=excluded.error_category, retrieved_memory_ids=excluded.retrieved_memory_ids`
+             error_category=excluded.error_category, retrieved_memory_ids=excluded.retrieved_memory_ids,
+             retrieved_context_ids=excluded.retrieved_context_ids`
         )
         .run({
           ...message,
           error_category: message.error_category ?? null,
-          retrieved_memory_ids: JSON.stringify(message.retrieved_memory_ids)
+          retrieved_memory_ids: JSON.stringify(message.retrieved_memory_ids),
+          retrieved_context_ids: JSON.stringify(message.retrieved_context_ids)
         })
       this.db.prepare('DELETE FROM messages_fts WHERE message_id = ?').run(message.message_id)
       this.db
@@ -233,9 +235,22 @@ export class IndexDatabase {
       })
     }
 
+    if (input.memoryType || input.state) {
+      return results.sort((a, b) => b.score - a.score).slice(0, input.limit)
+    }
+
     const projectClause = input.projectId ? ' AND c.project_id = ?' : ''
     const chatClause = input.chatId ? ' AND m.chat_id = ?' : ''
-    const messageValues = [terms, ...(input.projectId ? [input.projectId] : []), ...(input.chatId ? [input.chatId] : []), input.limit]
+    const fromClause = input.fromDate ? ' AND m.created_at >= ?' : ''
+    const toClause = input.toDate ? ' AND m.created_at < ?' : ''
+    const messageValues = [
+      terms,
+      ...(input.projectId ? [input.projectId] : []),
+      ...(input.chatId ? [input.chatId] : []),
+      ...(input.fromDate ? [`${input.fromDate}T00:00:00.000Z`] : []),
+      ...(input.toDate ? [`${nextDate(input.toDate)}T00:00:00.000Z`] : []),
+      input.limit
+    ]
     const messageRows = this.db
       .prepare(
         `SELECT m.message_id, m.chat_id, c.project_id, c.title, m.content, m.created_at,
@@ -243,7 +258,7 @@ export class IndexDatabase {
          FROM messages_fts
          JOIN messages m ON m.message_id = messages_fts.message_id
          JOIN chats c ON c.chat_id = m.chat_id
-         WHERE messages_fts MATCH ? ${projectClause} ${chatClause}
+         WHERE messages_fts MATCH ? ${projectClause} ${chatClause} ${fromClause} ${toClause}
          ORDER BY rank LIMIT ?`
       )
       .all(...messageValues) as Array<Record<string, unknown>>
@@ -264,14 +279,22 @@ export class IndexDatabase {
     }
 
     const chatProjectClause = input.projectId ? ' AND c.project_id = ?' : ''
+    const chatFromClause = input.fromDate ? ' AND c.created_at >= ?' : ''
+    const chatToClause = input.toDate ? ' AND c.created_at < ?' : ''
     const chatRows = this.db
       .prepare(
         `SELECT c.chat_id, c.project_id, c.title, c.created_at, bm25(chats_fts) AS rank
          FROM chats_fts JOIN chats c ON c.chat_id = chats_fts.chat_id
-         WHERE chats_fts MATCH ? ${chatProjectClause}
+         WHERE chats_fts MATCH ? ${chatProjectClause} ${chatFromClause} ${chatToClause}
          ORDER BY rank LIMIT ?`
       )
-      .all(terms, ...(input.projectId ? [input.projectId] : []), input.limit) as Array<Record<string, unknown>>
+      .all(
+        terms,
+        ...(input.projectId ? [input.projectId] : []),
+        ...(input.fromDate ? [`${input.fromDate}T00:00:00.000Z`] : []),
+        ...(input.toDate ? [`${nextDate(input.toDate)}T00:00:00.000Z`] : []),
+        input.limit
+      ) as Array<Record<string, unknown>>
     for (const row of chatRows) {
       results.push({
         kind: 'chat',
@@ -337,7 +360,8 @@ export class IndexDatabase {
         message_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
         role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL, sequence INTEGER NOT NULL,
-        error_category TEXT, retrieved_memory_ids TEXT NOT NULL DEFAULT '[]'
+        error_category TEXT, retrieved_memory_ids TEXT NOT NULL DEFAULT '[]',
+        retrieved_context_ids TEXT NOT NULL DEFAULT '[]'
       );
       CREATE TABLE IF NOT EXISTS memories (
         memory_id TEXT PRIMARY KEY, type TEXT NOT NULL, statement TEXT NOT NULL, project_id TEXT,
@@ -365,6 +389,12 @@ export class IndexDatabase {
       CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(message_id UNINDEXED, content, chat_id UNINDEXED, project_id UNINDEXED);
       CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(memory_id UNINDEXED, statement, type, state, project_id UNINDEXED, chat_id UNINDEXED);
     `)
+    const messageColumns = this.db.prepare('PRAGMA table_info(messages)').all() as Array<{
+      name: string
+    }>
+    if (!messageColumns.some((column) => column.name === 'retrieved_context_ids')) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN retrieved_context_ids TEXT NOT NULL DEFAULT '[]'")
+    }
     this.db
       .prepare('INSERT OR IGNORE INTO migration_state (version, applied_at) VALUES (?, ?)')
       .run(SCHEMA_VERSION, new Date().toISOString())
@@ -380,7 +410,7 @@ function toFtsQuery(query: string): string {
     .split(/\s+/)
     .filter(Boolean)
     .map((term) => `"${term}"*`)
-    .join(' AND ')
+    .join(' OR ')
 }
 
 function buildFilters(
@@ -406,7 +436,21 @@ function buildFilters(
     clauses.push(`${alias}.state = ?`)
     values.push(input.state)
   }
+  if (input.fromDate) {
+    clauses.push(`${alias}.created_at >= ?`)
+    values.push(`${input.fromDate}T00:00:00.000Z`)
+  }
+  if (input.toDate) {
+    clauses.push(`${alias}.created_at < ?`)
+    values.push(`${nextDate(input.toDate)}T00:00:00.000Z`)
+  }
   return { sql: clauses.length ? ` AND ${clauses.join(' AND ')}` : '', values }
+}
+
+function nextDate(value: string): string {
+  const date = new Date(`${value}T00:00:00.000Z`)
+  date.setUTCDate(date.getUTCDate() + 1)
+  return date.toISOString().slice(0, 10)
 }
 
 function rowToMemory(row: Record<string, unknown>): Memory {

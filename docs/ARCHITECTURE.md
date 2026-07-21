@@ -75,7 +75,7 @@ User-confirmed memories are never silently overwritten. Every accepted candidate
 
 ## Retrieval flow
 
-FTS5 supplies keyword candidates for messages, memories, and chat titles. Optional stored embeddings add cosine similarity. Ranking combines exact/keyword match, semantic similarity, project affinity, confirmation, pinned state, confidence, recency, and lifecycle penalties. Superseded, deleted, and rejected items are excluded by default. Selected items are truncated to configured item and character budgets and include source chat/message/excerpt metadata. Only that bounded context is added to the provider request.
+FTS5 supplies keyword candidates for messages, memories, and chat titles. Optional stored embeddings add cosine similarity. Ranking first requires lexical or semantic relevance, then combines exact/keyword match, semantic similarity, project affinity, confirmation, pinned state, confidence, recency, and lifecycle penalties. Superseded, deleted, and rejected items are excluded by default. When no structured memory survives the relevance gate, the engine searches prior indexed messages outside the current chat and may supply bounded transcript excerpts instead. Selected items are truncated to configured item and character budgets and include exact source chat/message/excerpt metadata. Only that bounded context is added to the provider request, and the assistant snapshot records IDs for every injected context item.
 
 ## Failure handling
 
