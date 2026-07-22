@@ -4,7 +4,7 @@
   { "text": "We may submit the form tomorrow.", "expected": [] },
   { "text": "The form was submitted today.", "expected": ["completed_item"] },
   { "text": "Do not use cloud storage.", "expected": ["instruction", "rejected_option"] },
-  { "text": "The earlier quantity is no longer correct.", "expected": ["fact"] },
+  { "text": "The earlier quantity is no longer correct.", "expected": ["correction"] },
   { "text": "Remember that I prefer concise reports.", "expected": ["preference"] },
   { "text": "The supplier may be able to change the thickness.", "expected": [] },
   { "text": "The supplier confirmed the thickness change.", "expected": ["project_state"] },

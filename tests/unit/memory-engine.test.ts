@@ -169,6 +169,34 @@ describe('memory extraction and reconciliation', () => {
     )
     expect(result.added[0]?.state).toBe('disputed')
   })
+
+  it('rejects negated decisions, flags uncertainty, and indexes explicit deadlines', () => {
+    expect(
+      deterministicCandidates(
+        [{ role: 'user', messageId: source, content: 'We have not decided to use the vendor.' }],
+        []
+      )
+    ).toHaveLength(0)
+    const uncertain = deterministicCandidates(
+      [{ role: 'user', messageId: source, content: 'Maybe we decided to use the vendor.' }],
+      []
+    )[0]!
+    expect(
+      reconcileMemories([], [{ ...uncertain, unresolved: true }], { chatId, projectId }).memories[0]
+        ?.state
+    ).toBe('needs_review')
+    const deadline = deterministicCandidates(
+      [{ role: 'user', messageId: source, content: 'The report is due by 2026-09-15.' }],
+      []
+    )[0]!
+    const memory = reconcileMemories([], [deadline], {
+      chatId,
+      projectId,
+      now: '2026-07-22T00:00:00.000Z'
+    }).memories[0]
+    expect(memory?.type).toBe('deadline')
+    expect(memory?.valid_until).toBe('2026-09-15T00:00:00.000Z')
+  })
 })
 
 function baseMemory(patch: Partial<Memory> = {}): Memory {
