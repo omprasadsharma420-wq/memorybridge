@@ -3,6 +3,7 @@ import {
   chatIdSchema,
   memoryIdSchema,
   memoryStateSchema,
+  memoryScopeSchema,
   memoryTypeSchema,
   messageIdSchema,
   projectIdSchema,
@@ -12,7 +13,11 @@ import {
   type Memory,
   type Message,
   type Project,
-  type VaultManifest
+  type VaultManifest,
+  type ImportRecord,
+  type MemoryEvidence,
+  type ProviderMemory,
+  type TopicSegment
 } from './schemas'
 
 export interface VaultStatus {
@@ -74,6 +79,40 @@ export interface DiagnosticResult {
   path: string
 }
 
+export interface ConnectorCapabilitiesView {
+  id: string
+  name: string
+  description: string
+  capabilities: Record<string, boolean>
+}
+
+export interface ImportPreviewResult {
+  token: string
+  fileName: string
+  connectorId: string
+  conversations: number
+  messages: number
+  providerMemories: number
+  warnings: string[]
+}
+
+export interface McpConfiguration {
+  command: string
+  args: string[]
+  env: Record<string, string>
+  transport: 'stdio'
+}
+
+export interface ProcessingProgress {
+  chatId: string
+  status: 'running' | 'complete' | 'cancelled' | 'failed'
+  completedSegments: number
+  totalSegments: number
+}
+
+export const importTokenInputSchema = z.object({ token: z.uuid() })
+export type ImportTokenInput = z.infer<typeof importTokenInputSchema>
+
 export const createProjectInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().max(2000).default('')
@@ -98,12 +137,22 @@ export const retryMessageInputSchema = z.object({
   userMessageId: messageIdSchema
 })
 export const chatOnlyInputSchema = z.object({ chatId: chatIdSchema })
+export const messageRangeInputSchema = z.object({
+  chatId: chatIdSchema,
+  afterSequence: z.number().int().min(-1).default(-1),
+  limit: z.number().int().min(1).max(1000).default(200)
+})
+export const memoryOnlyInputSchema = z.object({ memoryId: memoryIdSchema })
 export const searchInputSchema = z.object({
   query: z.string().trim().min(1).max(500),
   projectId: projectIdSchema.nullable().optional(),
   chatId: chatIdSchema.optional(),
   memoryType: memoryTypeSchema.optional(),
   state: memoryStateSchema.optional(),
+  provider: z.string().trim().min(1).max(120).optional(),
+  topicId: z.string().trim().min(1).max(120).optional(),
+  confirmedOnly: z.boolean().default(false).optional(),
+  allProjects: z.boolean().default(false).optional(),
   fromDate: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -132,7 +181,8 @@ export const memoryActionInputSchema = z.discriminatedUnion('action', [
     action: z.literal('supersede'),
     replacementId: memoryIdSchema
   }),
-  z.object({ memoryId: memoryIdSchema, action: z.literal('merge'), targetId: memoryIdSchema })
+  z.object({ memoryId: memoryIdSchema, action: z.literal('merge'), targetId: memoryIdSchema }),
+  z.object({ memoryId: memoryIdSchema, action: z.literal('set_scope'), scope: memoryScopeSchema })
 ])
 export const apiKeyInputSchema = z.object({ apiKey: z.string().trim().min(8).max(1000) })
 export const settingsInputSchema = settingsPatchSchema
@@ -156,6 +206,7 @@ export interface MemoryBridgeApi {
   updateChat(input: UpdateChatInput): Promise<Chat>
   listChats(): Promise<Chat[]>
   getMessages(chatId: string): Promise<Message[]>
+  getMessageRange(chatId: string, afterSequence?: number, limit?: number): Promise<Message[]>
   sendMessage(input: SendMessageInput): Promise<ChatTurnResult>
   retryMessage(input: RetryMessageInput): Promise<ChatTurnResult>
   stopGeneration(chatId: string): Promise<void>
@@ -168,7 +219,23 @@ export interface MemoryBridgeApi {
   testConnection(): Promise<{ ok: boolean; message: string }>
   rebuildIndex(): Promise<{ projects: number; chats: number; messages: number; memories: number }>
   rerunExtraction(chatId: string): Promise<Memory[]>
+  reprocessChat(chatId: string): Promise<{
+    segments: number
+    processedSegments: number
+    skippedSegments: number
+    memories: Memory[]
+  }>
+  cancelReprocessing(chatId: string): Promise<void>
+  listConnectors(): Promise<ConnectorCapabilitiesView[]>
+  chooseImport(): Promise<ImportPreviewResult | null>
+  executeImport(input: ImportTokenInput): Promise<ImportRecord>
+  scanImportInbox(): Promise<ImportRecord[]>
+  listTopics(chatId?: string): Promise<TopicSegment[]>
+  listEvidence(memoryId?: string): Promise<MemoryEvidence[]>
+  listProviderMemories(): Promise<ProviderMemory[]>
+  getMcpConfiguration(): Promise<McpConfiguration>
   exportDiagnostics(): Promise<DiagnosticResult>
   onStream(callback: (message: Message) => void): () => void
   onVaultStatus(callback: (status: VaultStatus) => void): () => void
+  onProcessingProgress(callback: (progress: ProcessingProgress) => void): () => void
 }

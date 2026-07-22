@@ -8,6 +8,7 @@ export interface ProviderMessage {
 export interface ChatRequest {
   messages: ProviderMessage[]
   model: string
+  maxOutputTokens?: number
   signal?: AbortSignal
 }
 
@@ -24,10 +25,21 @@ export interface ProviderHealth {
   message: string
 }
 
+export interface ProviderCapabilities {
+  chat: boolean
+  streaming: boolean
+  structuredOutput: boolean
+  embeddings: boolean
+  modelListing: boolean
+  cancellation: boolean
+}
+
 export interface AIProvider {
   readonly id: string
+  capabilities(): ProviderCapabilities
   streamChat(request: ChatRequest): AsyncIterable<string>
   generateStructured<T>(request: StructuredGenerationRequest<T>): Promise<T>
   embed(texts: string[], model: string, signal?: AbortSignal): Promise<number[][]>
   validateConfiguration(): Promise<ProviderHealth>
+  listModels(signal?: AbortSignal): Promise<string[]>
 }

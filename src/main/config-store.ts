@@ -1,5 +1,10 @@
 import { join } from 'node:path'
-import { appSettingsSchema, type AppSettings, type SettingsPatch } from '../shared/schemas'
+import {
+  appSettingsSchema,
+  type AppSettings,
+  type RegisteredVault,
+  type SettingsPatch
+} from '../shared/schemas'
 import {
   atomicWriteJson,
   ensureDirectory,
@@ -29,7 +34,12 @@ export class ConfigStore {
     return { ...this.settings }
   }
 
-  async update(patch: SettingsPatch & { lastVaultPath?: string | null }): Promise<AppSettings> {
+  async update(
+    patch: SettingsPatch & {
+      lastVaultPath?: string | null
+      registeredVaults?: RegisteredVault[]
+    }
+  ): Promise<AppSettings> {
     this.settings = appSettingsSchema.parse({ ...this.settings, ...patch })
     await this.persist()
     return this.get()

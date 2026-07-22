@@ -1,5 +1,7 @@
 import { app, dialog, type BrowserWindow } from 'electron'
 import { join } from 'node:path'
+import { basename } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { platform, release } from 'node:os'
 import type {
   BootstrapState,
@@ -16,13 +18,26 @@ import type {
   UpdateProjectInput,
   VaultStatus
 } from '../shared/contracts'
-import type { AppSettings, Chat, Memory, Message, Project, SettingsPatch } from '../shared/schemas'
+import type {
+  AppSettings,
+  Chat,
+  ImportRecord,
+  Memory,
+  MemoryEvidence,
+  Message,
+  Project,
+  ProviderMemory,
+  SettingsPatch,
+  TopicSegment
+} from '../shared/schemas'
 import { safeErrorCategory } from '../shared/security'
 import { ChatService } from './chat-service'
 import { ConfigStore } from './config-store'
 import { AppError } from './errors'
 import { SafeLogger } from './logger'
 import { MemoryEngine } from './memory/memory-engine'
+import { CONNECTORS } from './ingestion/connectors'
+import { ImportService, type ImportPreview } from './ingestion/import-service'
 import { CredentialStore } from './providers/credential-store'
 import { MockProvider } from './providers/mock-provider'
 import { OpenAICompatibleProvider } from './providers/openai-compatible-provider'
@@ -41,6 +56,9 @@ export class AppService {
   private repository: VaultRepository | null = null
   private memoryEngine: MemoryEngine | null = null
   private chatService: ChatService | null = null
+  private importService: ImportService | null = null
+  private readonly pendingImports = new Map<string, string>()
+  private readonly processingControllers = new Map<string, AbortController>()
   private window: BrowserWindow | null = null
   private readonly mockProvider = new MockProvider()
 
@@ -57,9 +75,17 @@ export class AppService {
   async initialize(): Promise<void> {
     this.settings = await this.config.load()
     if (this.settings.lastVaultPath) {
+      const registered = this.settings.registeredVaults.find(
+        (item) => item.path === this.settings.lastVaultPath
+      )
+      if (!registered) return
       try {
         await this.vault.open(this.settings.lastVaultPath)
-        await this.initializeRepository()
+        if (this.vault.identity.vault_id !== registered.vault_id) {
+          this.vault.disconnect()
+          return
+        }
+        if ((await this.vault.status()).writable) await this.initializeRepository()
       } catch (error) {
         await this.logger.write({
           event: 'vault.auto_open_failed',
@@ -83,8 +109,9 @@ export class AppService {
 
   async createVault(path: string): Promise<BootstrapState> {
     this.closeRepository()
+    this.vault.disconnect()
     await this.vault.create(path)
-    await this.config.update({ lastVaultPath: this.vault.root })
+    await this.rememberVault()
     this.settings = this.config.get()
     await this.initializeRepository()
     await this.logger.write({ event: 'vault.created' })
@@ -93,10 +120,11 @@ export class AppService {
 
   async openVault(path: string): Promise<BootstrapState> {
     this.closeRepository()
+    this.vault.disconnect()
     await this.vault.open(path)
-    await this.config.update({ lastVaultPath: this.vault.root })
+    await this.rememberVault()
     this.settings = this.config.get()
-    await this.initializeRepository()
+    if ((await this.vault.status()).writable) await this.initializeRepository()
     await this.logger.write({ event: 'vault.opened' })
     return this.bootstrap()
   }
@@ -129,6 +157,10 @@ export class AppService {
 
   async getMessages(chatId: string): Promise<Message[]> {
     return this.repo.readMessages(chatId)
+  }
+
+  async getMessageRange(chatId: string, afterSequence: number, limit: number): Promise<Message[]> {
+    return this.repo.readMessageRange(chatId, { afterSequence, limit })
   }
 
   async sendMessage(input: SendMessageInput): Promise<ChatTurnResult> {
@@ -194,6 +226,10 @@ export class AppService {
     if (input.action === 'merge') {
       return this.memory.applyAction(input.memoryId, { kind: 'merge', targetId: input.targetId })
     }
+    if (input.action === 'set_scope') {
+      if (input.scope.kind === 'project') await this.repo.getProject(input.scope.project_id)
+      return this.memory.applyAction(input.memoryId, { kind: 'set_scope', scope: input.scope })
+    }
     return this.memory.applyAction(input.memoryId, { kind: input.action })
   }
 
@@ -224,7 +260,137 @@ export class AppService {
   }
 
   async rerunExtraction(chatId: string): Promise<Memory[]> {
-    return this.memory.extractTurn(chatId, await this.getProvider(), this.settings)
+    return (await this.reprocessChat(chatId)).memories
+  }
+
+  async reprocessChat(chatId: string): Promise<{
+    segments: number
+    processedSegments: number
+    skippedSegments: number
+    memories: Memory[]
+  }> {
+    this.processingControllers.get(chatId)?.abort()
+    const controller = new AbortController()
+    this.processingControllers.set(chatId, controller)
+    await this.repo.setChatProcessingState(chatId, 'processing')
+    try {
+      const result = await this.memory.reprocessChat(
+        chatId,
+        await this.getProvider(),
+        this.settings,
+        controller.signal,
+        (completedSegments, totalSegments) =>
+          this.window?.webContents.send('processing:progress', {
+            chatId,
+            status: 'running',
+            completedSegments,
+            totalSegments
+          })
+      )
+      const cancelled = controller.signal.aborted
+      await this.repo.setChatProcessingState(chatId, cancelled ? 'cancelled' : 'processed')
+      this.window?.webContents.send('processing:progress', {
+        chatId,
+        status: cancelled ? 'cancelled' : 'complete',
+        completedSegments: result.processedSegments + result.skippedSegments,
+        totalSegments: result.segments
+      })
+      return result
+    } catch (error) {
+      await this.repo.setChatProcessingState(chatId, 'failed')
+      this.window?.webContents.send('processing:progress', {
+        chatId,
+        status: 'failed',
+        completedSegments: 0,
+        totalSegments: 0
+      })
+      throw error
+    } finally {
+      if (this.processingControllers.get(chatId) === controller)
+        this.processingControllers.delete(chatId)
+    }
+  }
+
+  cancelReprocessing(chatId: string): void {
+    this.processingControllers.get(chatId)?.abort()
+  }
+
+  listConnectors(): Array<{
+    id: string
+    name: string
+    description: string
+    capabilities: Record<string, boolean>
+  }> {
+    return CONNECTORS.map((connector) => ({
+      ...connector,
+      capabilities: { ...connector.capabilities }
+    }))
+  }
+
+  async chooseImport(): Promise<
+    (Omit<ImportPreview, 'sourcePath'> & { token: string; fileName: string }) | null
+  > {
+    const selection = await dialog.showOpenDialog({
+      title: 'Choose a conversation export',
+      properties: ['openFile'],
+      filters: [
+        {
+          name: 'Conversation exports',
+          extensions: ['zip', 'json', 'jsonl', 'md', 'markdown', 'txt']
+        }
+      ]
+    })
+    const sourcePath = selection.filePaths[0]
+    if (selection.canceled || !sourcePath) return null
+    const preview = await this.ingestion.preview(sourcePath)
+    const token = randomUUID()
+    this.pendingImports.set(token, sourcePath)
+    return {
+      token,
+      fileName: basename(sourcePath),
+      connectorId: preview.connectorId,
+      conversations: preview.conversations,
+      messages: preview.messages,
+      providerMemories: preview.providerMemories,
+      warnings: preview.warnings
+    }
+  }
+
+  async executeImport(token: string): Promise<ImportRecord> {
+    const sourcePath = this.pendingImports.get(token)
+    if (!sourcePath) throw new AppError('IMPORT_TOKEN_INVALID', 'Choose the import file again.')
+    this.pendingImports.delete(token)
+    return this.ingestion.import(sourcePath)
+  }
+
+  async scanImportInbox(): Promise<ImportRecord[]> {
+    return this.ingestion.scanInbox()
+  }
+
+  listTopics(chatId?: string): TopicSegment[] {
+    return this.repo.listTopics(chatId)
+  }
+
+  listEvidence(memoryId?: string): MemoryEvidence[] {
+    return this.repo.listEvidence(memoryId)
+  }
+
+  listProviderMemories(): ProviderMemory[] {
+    return this.repo.listProviderMemories()
+  }
+
+  getMcpConfiguration(): {
+    command: string
+    args: string[]
+    env: Record<string, string>
+    transport: 'stdio'
+  } {
+    return {
+      command: process.execPath,
+      args: [join(app.getAppPath(), 'out', 'main', 'mcp-server.js'), '--vault', this.vault.root],
+      env: { ELECTRON_RUN_AS_NODE: '1' },
+      transport: 'stdio'
+    }
   }
 
   async exportDiagnostics(): Promise<DiagnosticResult> {
@@ -279,12 +445,14 @@ export class AppService {
 
   close(): void {
     this.closeRepository()
+    this.vault.disconnect()
   }
 
   private async initializeRepository(): Promise<void> {
     this.repository = new VaultRepository(this.vault)
     await this.repository.initialize()
     this.memoryEngine = new MemoryEngine(this.repository)
+    this.importService = new ImportService(this.vault, this.repository)
     const retrieval = new RetrievalEngine(this.repository)
     this.chatService = new ChatService(
       this.repository,
@@ -296,11 +464,32 @@ export class AppService {
     )
   }
 
+  private async rememberVault(): Promise<void> {
+    const now = new Date().toISOString()
+    const registeredVaults = this.settings.registeredVaults.filter(
+      (item) => item.vault_id !== this.vault.identity.vault_id
+    )
+    registeredVaults.push({
+      vault_id: this.vault.identity.vault_id,
+      path: this.vault.root,
+      registered_at: now,
+      last_opened_at: now
+    })
+    this.settings = await this.config.update({
+      lastVaultPath: this.vault.root,
+      registeredVaults
+    })
+  }
+
   private closeRepository(): void {
     this.repository?.close()
     this.repository = null
     this.memoryEngine = null
     this.chatService = null
+    this.importService = null
+    this.pendingImports.clear()
+    for (const controller of this.processingControllers.values()) controller.abort()
+    this.processingControllers.clear()
   }
 
   private async getProvider(): Promise<AIProvider> {
@@ -339,5 +528,11 @@ export class AppService {
     if (!this.chatService)
       throw new AppError('VAULT_DISCONNECTED', 'Connect a vault to continue.', true)
     return this.chatService
+  }
+
+  private get ingestion(): ImportService {
+    if (!this.importService)
+      throw new AppError('VAULT_DISCONNECTED', 'Connect a writable vault to import.', true)
+    return this.importService
   }
 }

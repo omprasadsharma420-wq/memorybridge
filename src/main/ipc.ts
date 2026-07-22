@@ -5,10 +5,13 @@ import {
   createChatInputSchema,
   createProjectInputSchema,
   memoryActionInputSchema,
+  memoryOnlyInputSchema,
+  messageRangeInputSchema,
   retryMessageInputSchema,
   searchInputSchema,
   sendMessageInputSchema,
   settingsInputSchema,
+  importTokenInputSchema,
   updateChatInputSchema,
   updateProjectInputSchema
 } from '../shared/contracts'
@@ -49,6 +52,10 @@ export function registerIpc(service: AppService): void {
     const { chatId } = chatOnlyInputSchema.parse(input)
     return service.getMessages(chatId)
   })
+  ipcMain.handle('chat:message-range', (_event, input: unknown) => {
+    const parsed = messageRangeInputSchema.parse(input)
+    return service.getMessageRange(parsed.chatId, parsed.afterSequence, parsed.limit)
+  })
   ipcMain.handle('chat:send', (_event, input: unknown) =>
     service.sendMessage(sendMessageInputSchema.parse(input))
   )
@@ -83,6 +90,31 @@ export function registerIpc(service: AppService): void {
     const { chatId } = chatOnlyInputSchema.parse(input)
     return service.rerunExtraction(chatId)
   })
+  ipcMain.handle('processing:chat', (_event, input: unknown) => {
+    const { chatId } = chatOnlyInputSchema.parse(input)
+    return service.reprocessChat(chatId)
+  })
+  ipcMain.handle('processing:cancel', (_event, input: unknown) => {
+    const { chatId } = chatOnlyInputSchema.parse(input)
+    service.cancelReprocessing(chatId)
+  })
+  ipcMain.handle('connector:list', () => service.listConnectors())
+  ipcMain.handle('import:choose', () => service.chooseImport())
+  ipcMain.handle('import:execute', (_event, input: unknown) => {
+    const { token } = importTokenInputSchema.parse(input)
+    return service.executeImport(token)
+  })
+  ipcMain.handle('import:scan-inbox', () => service.scanImportInbox())
+  ipcMain.handle('topic:list', (_event, input: unknown) => {
+    const { chatId } = chatOnlyInputSchema.partial().parse(input ?? {})
+    return service.listTopics(chatId)
+  })
+  ipcMain.handle('evidence:list', (_event, input: unknown) => {
+    const { memoryId } = memoryOnlyInputSchema.partial().parse(input ?? {})
+    return service.listEvidence(memoryId)
+  })
+  ipcMain.handle('provider-memory:list', () => service.listProviderMemories())
+  ipcMain.handle('mcp:configuration', () => service.getMcpConfiguration())
   ipcMain.handle('diagnostics:export', () => service.exportDiagnostics())
 }
 
@@ -97,6 +129,7 @@ export function unregisterIpc(): void {
     'chat:update',
     'chat:list',
     'chat:messages',
+    'chat:message-range',
     'chat:send',
     'chat:retry',
     'chat:stop',
@@ -109,6 +142,16 @@ export function unregisterIpc(): void {
     'provider:test',
     'index:rebuild',
     'extraction:rerun',
+    'processing:chat',
+    'processing:cancel',
+    'connector:list',
+    'import:choose',
+    'import:execute',
+    'import:scan-inbox',
+    'topic:list',
+    'evidence:list',
+    'provider-memory:list',
+    'mcp:configuration',
     'diagnostics:export'
   ]
   channels.forEach((channel) => ipcMain.removeHandler(channel))

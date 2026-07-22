@@ -118,6 +118,10 @@ select:focus-visible {
 .new-chat:hover {
   background: #293226;
 }
+.new-chat:active:not(:disabled),
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
 .new-chat:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -232,6 +236,8 @@ select:focus-visible {
   padding-top: 9px;
   display: flex;
   flex-direction: column;
+  max-height: 310px;
+  overflow-y: auto;
 }
 .vault-pill {
   margin-top: 10px;
@@ -252,6 +258,10 @@ select:focus-visible {
 }
 .vault-pill.disconnected > span {
   background: var(--danger);
+}
+.vault-pill.read-only > span {
+  background: var(--clay);
+  box-shadow: none;
 }
 .vault-pill div {
   display: flex;
@@ -559,7 +569,8 @@ select:focus-visible {
   display: flex;
   align-items: flex-end;
   padding: 0 18px;
-  gap: 20px;
+  gap: 10px;
+  overflow-x: auto;
 }
 .inspector-tabs button {
   height: 42px;
@@ -738,6 +749,19 @@ select:focus-visible {
   color: #555e56;
   font-size: 7px;
   margin-top: 6px;
+  flex-wrap: wrap;
+}
+.mcp-config {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border: 1px solid var(--line);
+  background: #0d110e;
+  border-radius: 7px;
+  padding: 10px;
+  color: #aeb5aa;
+  font-size: 9px;
 }
 .memory-actions {
   display: flex;

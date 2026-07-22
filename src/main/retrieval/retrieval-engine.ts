@@ -16,12 +16,22 @@ export class RetrievalEngine {
   ): Promise<RetrievedContextItem[]> {
     if (settings.maximumRetrievedMemories === 0 || settings.retrievalCharacterBudget === 0)
       return []
-    const memories = this.repository.listActiveMemories(projectId)
+    const memories = this.repository.listActiveMemories(
+      projectId,
+      excludeChatId,
+      settings.includeConversationScope
+    )
     let queryVector: number[] | null = null
     let vectors = new Map<string, number[]>()
     if (settings.semanticIndexingEnabled) {
       try {
-        queryVector = (await provider.embed([query], settings.embeddingModel))[0] ?? null
+        queryVector =
+          (
+            await provider.embed(
+              [query.slice(0, settings.embeddingCharacterBudget)],
+              settings.embeddingModel
+            )
+          )[0] ?? null
         vectors = new Map(
           this.repository
             .getEmbeddings(settings.embeddingModel)
@@ -48,14 +58,27 @@ export class RetrievalEngine {
     const items: RetrievedContextItem[] = []
     let usedCharacters = 0
     for (const { memory, score } of ranked) {
-      const messages = await this.repository.readMessages(memory.chat_id)
-      const sources = messages.filter((message) =>
-        memory.source_message_ids.includes(message.message_id)
-      )
-      const sourceExcerpt = excerpt(sources.map((message) => message.content).join(' '), 320)
+      const evidence = this.repository.listEvidence(memory.memory_id)
+      const excerptBudget = Math.min(320, settings.transcriptExcerptCharacterBudget)
+      let sourceExcerpt = excerptBudget
+        ? excerpt(evidence.map((item) => item.exact_excerpt).join(' '), excerptBudget)
+        : ''
+      if (!sourceExcerpt) {
+        const messages = await this.repository.readMessages(memory.chat_id)
+        sourceExcerpt = excerptBudget
+          ? excerpt(
+              messages
+                .filter((message) => memory.source_message_ids.includes(message.message_id))
+                .map((message) => message.content)
+                .join(' '),
+              excerptBudget
+            )
+          : ''
+      }
       const cost = memory.statement.length + sourceExcerpt.length
       if (usedCharacters + cost > settings.retrievalCharacterBudget) continue
-      const chat = chats.get(memory.chat_id)
+      const sourceChatId = evidence[0]?.chat_id ?? memory.chat_id
+      const chat = chats.get(sourceChatId)
       items.push({
         contextId: memory.memory_id,
         kind: 'memory',
@@ -64,7 +87,7 @@ export class RetrievalEngine {
         memoryType: memory.type,
         projectId: memory.project_id,
         projectName: memory.project_id ? (projects.get(memory.project_id)?.name ?? null) : null,
-        sourceChatId: memory.chat_id,
+        sourceChatId,
         sourceChatTitle: chat?.title ?? 'Unknown chat',
         sourceMessageIds: memory.source_message_ids,
         sourceExcerpt,
@@ -91,20 +114,21 @@ export class RetrievalEngine {
         )
       for (const result of transcriptResults) {
         if (items.length >= settings.maximumRetrievedMemories) break
-        const cost = result.excerpt.length * 2
+        const boundedExcerpt = result.excerpt.slice(0, settings.transcriptExcerptCharacterBudget)
+        const cost = boundedExcerpt.length * 2
         if (usedCharacters + cost > settings.retrievalCharacterBudget) continue
         items.push({
           contextId: result.id,
           kind: 'transcript',
           memoryId: null,
-          statement: result.excerpt,
+          statement: boundedExcerpt,
           memoryType: 'transcript_excerpt',
           projectId: result.projectId,
           projectName: result.projectId ? (projects.get(result.projectId)?.name ?? null) : null,
           sourceChatId: result.chatId,
           sourceChatTitle: result.title,
           sourceMessageIds: [result.id],
-          sourceExcerpt: result.excerpt,
+          sourceExcerpt: boundedExcerpt,
           timestamp: result.createdAt,
           state: 'source',
           score: result.score
@@ -144,16 +168,30 @@ export function hybridScore(
   const typeBoost = ['decision', 'instruction', 'preference', 'project_state'].includes(memory.type)
     ? 1
     : 0.5
+  const evidenceQuality = Math.min(
+    1,
+    (memory.evidence_ids?.length ?? memory.source_message_ids.length) / 2
+  )
+  const lifecycle = memory.state === 'needs_review' ? 0.35 : memory.state === 'confirmed' ? 1 : 0.75
+  const entityMatch = memory.entities.some((entity) =>
+    normalizedQuery.includes(normalizeForComparison(entity))
+  )
+    ? 1
+    : 0
   return (
-    (keywordScore * 0.36 +
-      semantic * 0.24 +
-      project * 0.14 +
+    (keywordScore * 0.3 +
+      semantic * 0.22 +
+      project * 0.13 +
       exactPhrase * 0.08 +
+      entityMatch * 0.03 +
       confirmation * 0.06 +
       pinned * 0.05 +
       recency * 0.04 +
-      typeBoost * 0.03) *
-    memory.confidence
+      typeBoost * 0.03 +
+      evidenceQuality * 0.04 +
+      lifecycle * 0.02) *
+    memory.confidence *
+    lifecycle
   )
 }
 

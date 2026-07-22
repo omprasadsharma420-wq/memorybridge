@@ -1,8 +1,8 @@
 {
   "name": "memorybridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Windows-first, local-first AI chat workspace and project-aware external memory system",
+  "description": "Windows-first, local-first universal AI memory layer with cited retrieval and MCP",
   "main": "./out/main/index.js",
   "author": "MemoryBridge contributors",
   "license": "UNLICENSED",
@@ -11,6 +11,7 @@
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
+    "mcp": "node out/main/mcp-server.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
@@ -24,6 +25,8 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "fflate": "^0.8.3",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "zod": "^4.3.5"
@@ -80,5 +83,8 @@
   },
   "engines": {
     "node": ">=22.12"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.5"
   }
 }

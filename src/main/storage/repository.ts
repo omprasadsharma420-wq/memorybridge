@@ -5,14 +5,22 @@ import { createId } from '../../shared/ids'
 import {
   chatSchema,
   extractionRunSchema,
+  memoryEvidenceSchema,
   memorySchema,
   messageSchema,
+  topicSegmentSchema,
+  importRecordSchema,
+  providerMemorySchema,
   projectSchema,
   type Chat,
   type ExtractionRun,
   type Memory,
   type Message,
-  type Project
+  type Project,
+  type MemoryEvidence,
+  type TopicSegment,
+  type ImportRecord,
+  type ProviderMemory
 } from '../../shared/schemas'
 import type { SearchInput, SearchResult } from '../../shared/contracts'
 import { slugify } from '../../shared/text'
@@ -29,6 +37,15 @@ import { IndexDatabase } from './index-database'
 import { VaultManager } from './vault'
 
 const memoryFileSchema = z.object({ schema_version: z.literal(1), memories: z.array(memorySchema) })
+const transcriptPatchSchema = z.object({
+  kind: z.literal('message_patch'),
+  message_id: z.string(),
+  content_delta: z.string().default(''),
+  status: z.enum(['pending', 'streaming', 'complete', 'interrupted', 'failed', 'cancelled']),
+  updated_at: z.string().datetime({ offset: true }),
+  error_category: z.string().max(120).optional()
+})
+const transcriptRecordSchema = z.union([messageSchema, transcriptPatchSchema])
 
 export interface RebuildStats {
   projects: number
@@ -48,6 +65,7 @@ export class VaultRepository {
     await this.vault.assertConnected()
     this.index?.close()
     const indexPath = this.vault.path('indexes', 'memorybridge.sqlite')
+    let rebuildRequired = !(await pathExists(indexPath))
     this.index = new IndexDatabase(indexPath)
     try {
       await this.index.open()
@@ -65,8 +83,14 @@ export class VaultRepository {
       }
       this.index = new IndexDatabase(indexPath)
       await this.index.open()
+      rebuildRequired = true
     }
-    const stats = await this.rebuildIndex()
+    if (this.db.getVaultId() !== this.vault.identity.vault_id) rebuildRequired = true
+    if (this.db.requiresContentRebuild()) rebuildRequired = true
+    const stats = rebuildRequired
+      ? await this.rebuildIndex()
+      : { projects: 0, chats: 0, messages: 0, memories: 0 }
+    this.db.setVaultId(this.vault.identity.vault_id)
     await this.recoverInterruptedMessages()
     return stats
   }
@@ -166,10 +190,20 @@ export class VaultRepository {
     const updated = chatSchema.parse({
       ...chat,
       ...(patch.title !== undefined ? { title: patch.title } : {}),
+      ...(patch.title !== undefined ? { slug: slugify(patch.title, 'chat') } : {}),
       ...(patch.projectId !== undefined ? { project_id: patch.projectId } : {}),
       updated_at: new Date().toISOString()
     })
-    await atomicWriteJson(join(this.getChatDirectory(chatId), 'metadata.json'), updated)
+    let directory = this.getChatDirectory(chatId)
+    await atomicWriteJson(join(directory, 'metadata.json'), updated)
+    if (updated.slug !== chat.slug) {
+      const readableDirectory = this.vault.path('chats', `${updated.chat_id}--${updated.slug}`)
+      if (!(await pathExists(readableDirectory))) {
+        await rename(directory, readableDirectory)
+        directory = readableDirectory
+        this.chatDirectories.set(chatId, directory)
+      }
+    }
     this.db.upsertChat(updated)
     const memories = await this.listMemories(chatId)
     if (patch.projectId !== undefined && memories.length > 0) {
@@ -180,6 +214,21 @@ export class VaultRepository {
       }))
       await this.replaceChatMemories(chatId, reassigned)
     }
+    return updated
+  }
+
+  async setChatProcessingState(
+    chatId: string,
+    processingState: Chat['processing_state']
+  ): Promise<Chat> {
+    const chat = await this.getChat(chatId)
+    const updated = chatSchema.parse({
+      ...chat,
+      processing_state: processingState,
+      updated_at: new Date().toISOString()
+    })
+    await atomicWriteJson(join(this.getChatDirectory(chatId), 'metadata.json'), updated)
+    this.db.upsertChat(updated)
     return updated
   }
 
@@ -206,14 +255,51 @@ export class VaultRepository {
     return validated
   }
 
+  async appendMessagePatch(message: Message, contentDelta = ''): Promise<Message> {
+    await this.vault.assertConnected()
+    const validated = messageSchema.parse(message)
+    await appendJsonLine(join(this.getChatDirectory(message.chat_id), 'transcript.jsonl'), {
+      kind: 'message_patch',
+      message_id: message.message_id,
+      content_delta: contentDelta,
+      status: message.status,
+      updated_at: message.updated_at,
+      ...(message.error_category ? { error_category: message.error_category } : {})
+    })
+    this.db.upsertMessage(validated)
+    return validated
+  }
+
   async readMessages(chatId: string): Promise<Message[]> {
     const transcript = join(this.getChatDirectory(chatId), 'transcript.jsonl')
-    const { values } = await readJsonLines(transcript, messageSchema)
+    const { values } = await readJsonLines(transcript, transcriptRecordSchema)
     const latest = new Map<string, Message>()
-    for (const snapshot of values) latest.set(snapshot.message_id, snapshot)
+    for (const record of values) {
+      if ('kind' in record) {
+        const previous = latest.get(record.message_id)
+        if (!previous) continue
+        latest.set(record.message_id, {
+          ...previous,
+          content: previous.content + record.content_delta,
+          status: record.status,
+          updated_at: record.updated_at,
+          ...(record.error_category ? { error_category: record.error_category } : {})
+        })
+      } else {
+        latest.set(record.message_id, record)
+      }
+    }
     return [...latest.values()].sort(
       (a, b) => a.sequence - b.sequence || a.created_at.localeCompare(b.created_at)
     )
+  }
+
+  async readMessageRange(
+    chatId: string,
+    options: { afterSequence?: number; limit?: number } = {}
+  ): Promise<Message[]> {
+    await this.getChat(chatId)
+    return this.db.listMessageRange(chatId, options.afterSequence ?? -1, options.limit ?? 200)
   }
 
   async nextSequence(chatId: string): Promise<number> {
@@ -236,13 +322,132 @@ export class VaultRepository {
   }
 
   async replaceChatMemories(chatId: string, memories: Memory[]): Promise<void> {
+    const previous = await this.listMemories(chatId)
     const validated = memories.map((memory) => memorySchema.parse(memory))
     await atomicWriteJson(join(this.getChatDirectory(chatId), 'memories.json'), {
       schema_version: 1,
       memories: validated
     })
+    this.db.removeMissingChatMemories(
+      chatId,
+      validated.map((memory) => memory.memory_id)
+    )
     for (const memory of validated) this.db.upsertMemory(memory)
-    await this.updateProjectMemoryFiles()
+    const projectIds = new Set(
+      [...previous, ...validated]
+        .map((memory) => memory.project_id)
+        .filter((projectId): projectId is string => Boolean(projectId))
+    )
+    for (const projectId of projectIds) await this.updateProjectMemoryFile(projectId)
+  }
+
+  async saveEvidence(records: MemoryEvidence[]): Promise<void> {
+    for (const record of records) {
+      const validated = memoryEvidenceSchema.parse(record)
+      await appendJsonLine(this.vault.path('evidence', `${validated.memory_id}.jsonl`), validated)
+      this.db.upsertEvidence(validated)
+    }
+  }
+
+  listEvidence(memoryId?: string): MemoryEvidence[] {
+    return this.db.listEvidence(memoryId)
+  }
+
+  async replaceTopics(chatId: string, topics: TopicSegment[]): Promise<void> {
+    const validated = topics.map((topic) => topicSegmentSchema.parse(topic))
+    await atomicWriteJson(this.vault.path('topics', `${chatId}.json`), {
+      schema_version: 1,
+      topics: validated
+    })
+    this.db.deleteTopicsForChat(chatId)
+    for (const topic of validated) this.db.upsertTopic(topic)
+  }
+
+  listTopics(chatId?: string): TopicSegment[] {
+    return this.db.listTopics(chatId)
+  }
+
+  async saveImportRecord(record: ImportRecord): Promise<void> {
+    const validated = importRecordSchema.parse(record)
+    await atomicWriteJson(
+      this.vault.path('import-records', `${validated.import_id}.json`),
+      validated
+    )
+    this.db.upsertImportRecord(validated)
+  }
+
+  findImportByHash(hash: string): ImportRecord | null {
+    return this.db.findImportByHash(hash)
+  }
+
+  async saveProviderMemory(memory: ProviderMemory): Promise<void> {
+    const validated = providerMemorySchema.parse(memory)
+    await atomicWriteJson(
+      this.vault.path('provider-memories', `${validated.provider_memory_id}.json`),
+      validated
+    )
+    this.db.upsertProviderMemory(validated)
+  }
+
+  listProviderMemories(): ProviderMemory[] {
+    return this.db.listProviderMemories()
+  }
+
+  invalidateEmbedding(memoryId: string): void {
+    this.db.invalidateEmbedding(memoryId)
+  }
+
+  async upsertCanonicalConversation(
+    conversation: Chat,
+    messages: Message[]
+  ): Promise<'imported' | 'changed' | 'unchanged'> {
+    await this.vault.assertConnected()
+    const parsedChat = chatSchema.parse(conversation)
+    const existing = (await this.listChats()).find(
+      (chat) =>
+        chat.source_provider === parsedChat.source_provider &&
+        chat.source_conversation_id === parsedChat.source_conversation_id
+    )
+    if (existing?.content_hash && existing.content_hash === parsedChat.content_hash)
+      return 'unchanged'
+    const target = existing
+      ? chatSchema.parse({ ...parsedChat, chat_id: existing.chat_id })
+      : parsedChat
+    let directory: string
+    if (existing) {
+      directory = this.getChatDirectory(existing.chat_id)
+    } else {
+      directory = this.vault.path('chats', `${target.chat_id}--${target.slug}`)
+      await ensureDirectory(directory)
+      await atomicWriteJson(join(directory, 'memories.json'), { schema_version: 1, memories: [] })
+      await appendJsonLine(join(directory, 'extractions.jsonl'), {
+        kind: 'metadata',
+        schema_version: 1,
+        created_at: target.created_at
+      })
+      this.chatDirectories.set(target.chat_id, directory)
+    }
+    await atomicWriteJson(join(directory, 'metadata.json'), target)
+    this.db.upsertChat(target)
+    const prior = new Map(
+      (existing ? await this.readMessages(existing.chat_id) : []).map((message) => [
+        message.provider_message_id ?? message.message_id,
+        message
+      ])
+    )
+    for (const incoming of messages) {
+      const key = incoming.provider_message_id ?? incoming.message_id
+      const previous = prior.get(key)
+      const message = messageSchema.parse({
+        ...incoming,
+        chat_id: target.chat_id,
+        ...(previous ? { message_id: previous.message_id, sequence: previous.sequence } : {})
+      })
+      const fingerprint = message.content_hash ?? message.content
+      if ((previous?.content_hash ?? previous?.content) === fingerprint) continue
+      await this.appendMessage(message)
+    }
+    return existing ? 'changed' : 'imported'
   }
 
   async saveExtractionRun(run: ExtractionRun): Promise<void> {
@@ -255,12 +460,16 @@ export class VaultRepository {
     return this.db.search(input)
   }
 
-  listActiveMemories(projectId?: string | null): Memory[] {
-    return this.db.listActiveMemories(projectId)
+  listActiveMemories(
+    projectId: string | null,
+    chatId?: string | null,
+    includeConversation = true
+  ): Memory[] {
+    return this.db.listActiveMemories(projectId, chatId, includeConversation)
   }
 
-  storeEmbedding(memoryId: string, model: string, vector: number[]): void {
-    this.db.storeEmbedding(memoryId, model, vector)
+  storeEmbedding(memoryId: string, model: string, vector: number[], contentHash: string): void {
+    this.db.storeEmbedding(memoryId, model, vector, contentHash)
   }
 
   getEmbeddings(model: string): Array<{ memoryId: string; vector: number[] }> {
@@ -289,6 +498,40 @@ export class VaultRepository {
       const extractionRuns = await readJsonLines(extractionPath, extractionRunSchema)
       for (const run of extractionRuns.values) this.db.upsertExtractionRun(run)
     }
+    for (const entry of await readdir(this.vault.path('evidence'), { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
+      const records = await readJsonLines(
+        this.vault.path('evidence', entry.name),
+        memoryEvidenceSchema
+      )
+      for (const record of records.values) this.db.upsertEvidence(record)
+    }
+    for (const entry of await readdir(this.vault.path('topics'), { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      const topicFileSchema = z.object({
+        schema_version: z.literal(1),
+        topics: z.array(topicSegmentSchema)
+      })
+      const file = await readValidatedJson(this.vault.path('topics', entry.name), topicFileSchema)
+      for (const topic of file.topics) this.db.upsertTopic(topic)
+    }
+    for (const entry of await readdir(this.vault.path('import-records'), { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      this.db.upsertImportRecord(
+        await readValidatedJson(this.vault.path('import-records', entry.name), importRecordSchema)
+      )
+    }
+    for (const entry of await readdir(this.vault.path('provider-memories'), {
+      withFileTypes: true
+    })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      this.db.upsertProviderMemory(
+        await readValidatedJson(
+          this.vault.path('provider-memories', entry.name),
+          providerMemorySchema
+        )
+      )
+    }
     return {
       projects: projects.length,
       chats: chats.length,
@@ -299,18 +542,14 @@ export class VaultRepository {
 
   async recoverInterruptedMessages(): Promise<number> {
     let count = 0
-    for (const chat of await this.listChats()) {
-      for (const message of await this.readMessages(chat.chat_id)) {
-        if (message.role === 'assistant' && ['pending', 'streaming'].includes(message.status)) {
-          await this.appendMessage({
-            ...message,
-            status: 'interrupted',
-            updated_at: new Date().toISOString(),
-            error_category: 'application-restart'
-          })
-          count += 1
-        }
-      }
+    for (const message of this.db.listNonterminalMessages()) {
+      await this.appendMessagePatch({
+        ...message,
+        status: 'interrupted',
+        updated_at: new Date().toISOString(),
+        error_category: 'application-restart'
+      })
+      count += 1
     }
     return count
   }
@@ -359,20 +598,12 @@ export class VaultRepository {
     return directory
   }
 
-  private async updateProjectMemoryFiles(): Promise<void> {
-    const all = await this.listMemories()
-    for (const project of await this.listProjects()) {
-      const memoryIds = all
-        .filter((memory) => memory.project_id === project.project_id && memory.state !== 'deleted')
-        .map((memory) => memory.memory_id)
-      await atomicWriteJson(
-        join(this.getProjectDirectory(project.project_id), 'project-memory.json'),
-        {
-          schema_version: 1,
-          memory_ids: memoryIds
-        }
-      )
-    }
+  private async updateProjectMemoryFile(projectId: string): Promise<void> {
+    const memoryIds = this.db.listProjectMemoryIds(projectId)
+    await atomicWriteJson(join(this.getProjectDirectory(projectId), 'project-memory.json'), {
+      schema_version: 1,
+      memory_ids: memoryIds
+    })
   }
 
   describeChatDirectory(chatId: string): string {

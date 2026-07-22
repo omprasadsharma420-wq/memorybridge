@@ -2,6 +2,7 @@ import type {
   AIProvider,
   ChatRequest,
   ProviderHealth,
+  ProviderCapabilities,
   StructuredGenerationRequest
 } from './provider'
 import { deterministicCandidates } from '../memory/deterministic-extractor'
@@ -25,6 +26,17 @@ export class MockProvider implements AIProvider {
   readonly id = 'mock'
   callCount = 0
   private readonly interruptedInputs = new Set<string>()
+
+  capabilities(): ProviderCapabilities {
+    return {
+      chat: true,
+      streaming: true,
+      structuredOutput: true,
+      embeddings: true,
+      modelListing: true,
+      cancellation: true
+    }
+  }
 
   async *streamChat(request: ChatRequest): AsyncIterable<string> {
     this.callCount += 1
@@ -74,6 +86,10 @@ export class MockProvider implements AIProvider {
 
   async validateConfiguration(): Promise<ProviderHealth> {
     return { ok: true, message: 'Mock provider is ready. No credential or network is required.' }
+  }
+
+  async listModels(): Promise<string[]> {
+    return ['mock-chat', 'mock-extraction', 'mock-embedding']
   }
 }
 

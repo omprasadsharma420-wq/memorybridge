@@ -22,6 +22,12 @@ export function deterministicCandidates(
       const source = [message.messageId]
 
       if (isProposalOnly(lower)) continue
+      if (
+        /\b(?:have|has|had|did) not\s+(?:yet\s+)?(?:decided|agreed|confirmed|completed)\b/.test(
+          lower
+        )
+      )
+        continue
 
       if (/\bremember (?:that )?i prefer\b|\bi prefer\b|\bmy preference is\b/.test(lower)) {
         candidates.push(candidate('preference', sentence, source, 0.95, existing, true))
@@ -68,8 +74,27 @@ export function deterministicCandidates(
         continue
       }
 
-      if (/\bno longer correct\b|\bpreviously\b.+\bnow\b|\bchanged from\b/.test(lower)) {
-        candidates.push(candidate('fact', sentence, source, 0.88, existing, true))
+      if (
+        /\bno longer correct\b|\bpreviously\b.+\bnow\b|\bchanged from\b|\bcorrection\b/.test(lower)
+      ) {
+        candidates.push(candidate('correction', sentence, source, 0.88, existing, true))
+        continue
+      }
+
+      if (/\b(?:deadline|due(?: by| on)?|no later than)\b/.test(lower)) {
+        candidates.push(candidate('deadline', sentence, source, 0.9, existing, false))
+        continue
+      }
+
+      if (/\b(?:must|cannot|can't|limited to|at most|at least|budget cap)\b/.test(lower)) {
+        candidates.push(candidate('constraint', sentence, source, 0.88, existing, false))
+        continue
+      }
+
+      if (
+        /\b(?:file|document|spreadsheet|repository|repo|prototype|contract|report)\b/.test(lower)
+      ) {
+        candidates.push(candidate('artifact', sentence, source, 0.76, existing, false))
         continue
       }
 
@@ -154,7 +179,7 @@ function numbers(input: string): string {
 }
 
 function extractEntities(input: string): string[] {
-  const entities = input.match(/\b[A-Z][A-Za-z0-9-]{2,}\b/g) ?? []
+  const entities = input.match(/[\p{Lu}][\p{Letter}\p{Number}-]{2,}/gu) ?? []
   return [...new Set(entities)].slice(0, 12)
 }
 
