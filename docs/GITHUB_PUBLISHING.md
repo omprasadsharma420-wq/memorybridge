@@ -1,21 +1,18 @@
-# GitHub publication
+# GitHub publishing
 
-A private repository was created successfully at:
+The private repository is `omprasadsharma420-wq/memorybridge` with `origin` configured over HTTPS. Production-pivot work belongs on `codex/memorybridge-production-pivot`; do not push it directly to `main`.
 
-`https://github.com/omprasadsharma420-wq/memorybridge`
+## Required release workflow
 
-The local `origin` remote points to that repository, `main` tracks `origin/main`, and the complete verified history is published. The repository owner approved GitHub CLI's separate `workflow` scope before the CI workflow was pushed.
+1. Confirm the diff contains no real vaults, exports, credentials, paths, generated release artifacts, or unrelated changes.
+2. Run formatting, lint, types, unit/integration tests, build, UI test, audit, and Windows packaging.
+3. Commit in logical groups with evidence in commit messages or the PR body.
+4. Push the branch to `origin`.
+5. Open a draft PR against `main` describing migration, scope/security invariants, test evidence, and explicit non-claims.
+6. Wait for GitHub Actions; inspect logs and repair failures before marking ready.
 
-Hosted runs are available at:
+The workflow triggers on `main` and `codex/**`, uploads the unsigned NSIS installer, and must not receive secrets or real exports. Signed distribution remains a separate release decision.
 
-`https://github.com/omprasadsharma420-wq/memorybridge/actions`
+## Handoff link
 
-To verify publication and the latest CI result:
-
-```powershell
-gh repo view omprasadsharma420-wq/memorybridge --json name,isPrivate,url,defaultBranchRef
-gh run list --repo omprasadsharma420-wq/memorybridge --limit 5
-git status --short --branch
-```
-
-The local and remote branch tips must match, the default branch must be `main`, and the repository must remain private. `.gitattributes` enforces LF checkout for deterministic Prettier checks on Windows runners.
+After push, use the branch or PR URL as the link to send to ChatGPT work. A local filesystem link is not portable to another ChatGPT task.
