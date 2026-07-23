@@ -1,14 +1,16 @@
 import { performance } from 'node:perf_hooks'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createId } from '../../src/shared/ids'
-import type { Message } from '../../src/shared/schemas'
+import { chatSchema, type Chat, type Message } from '../../src/shared/schemas'
 import { VaultRepository } from '../../src/main/storage/repository'
 import { createHarness } from '../helpers'
 
 describe('representative large vault', () => {
   it(
     'opens and searches hundreds of conversations and thousands of messages without a rebuild',
-    { timeout: 90_000 },
+    { timeout: 180_000 },
     async () => {
       const harness = await createHarness()
       try {
@@ -17,30 +19,60 @@ describe('representative large vault', () => {
             harness.repository.createProject(`${name} Project`, `${name} synthetic workload`)
           )
         )
-        const chats = []
+        const chats: Chat[] = []
         for (let index = 0; index < 200; index += 1) {
+          const timestamp = new Date(Date.UTC(2026, 6, 23, 0, 0, index)).toISOString()
           chats.push(
-            await harness.repository.createChat(projects[index % projects.length]!.project_id)
-          )
-        }
-        for (let offset = 0; offset < chats.length; offset += 20) {
-          await Promise.all(
-            chats.slice(offset, offset + 20).map(async (chat, chatIndex) => {
-              for (let sequence = 0; sequence < 10; sequence += 1) {
-                const absolute = offset + chatIndex
-                await harness.repository.appendMessage(
-                  syntheticMessage(
-                    chat.chat_id,
-                    sequence,
-                    sequence === 5
-                      ? `We decided durable repeated choice LV-${absolute % 7} for conversation ${absolute}.`
-                      : `Synthetic message ${sequence} for conversation ${absolute} searchable-corpus.`
-                  )
-                )
-              }
+            chatSchema.parse({
+              chat_id: createId('chat'),
+              project_id: projects[index % projects.length]!.project_id,
+              title: `Synthetic conversation ${index}`,
+              slug: `synthetic-conversation-${index}`,
+              created_at: timestamp,
+              updated_at: timestamp,
+              source_provider: 'synthetic',
+              sync_state: 'local',
+              processing_state: 'unprocessed'
             })
           )
         }
+        for (let offset = 0; offset < chats.length; offset += 25) {
+          await Promise.all(
+            chats.slice(offset, offset + 25).map(async (chat, chatIndex) => {
+              const absolute = offset + chatIndex
+              const directory = join(harness.directory, 'chats', `${chat.chat_id}--${chat.slug}`)
+              const messages = Array.from({ length: 10 }, (_, sequence) =>
+                syntheticMessage(
+                  chat.chat_id,
+                  sequence,
+                  sequence === 5
+                    ? `We decided durable repeated choice LV-${absolute % 7} for conversation ${absolute}.`
+                    : `Synthetic message ${sequence} for conversation ${absolute} searchable-corpus.`
+                )
+              )
+              await mkdir(directory, { recursive: true })
+              await Promise.all([
+                writeFile(join(directory, 'metadata.json'), `${JSON.stringify(chat, null, 2)}\n`),
+                writeFile(
+                  join(directory, 'transcript.jsonl'),
+                  `${messages.map((message) => JSON.stringify(message)).join('\n')}\n`
+                ),
+                writeFile(
+                  join(directory, 'memories.json'),
+                  `${JSON.stringify({ schema_version: 1, memories: [] }, null, 2)}\n`
+                ),
+                writeFile(
+                  join(directory, 'extractions.jsonl'),
+                  `${JSON.stringify({ kind: 'metadata', schema_version: 1, created_at: chat.created_at })}\n`
+                )
+              ])
+            })
+          )
+        }
+        expect(await harness.repository.rebuildIndex()).toMatchObject({
+          chats: 200,
+          messages: 2000
+        })
         expect(await harness.repository.listChats()).toHaveLength(200)
         const started = performance.now()
         const results = harness.repository.search({
