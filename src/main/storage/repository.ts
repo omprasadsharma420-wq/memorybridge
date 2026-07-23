@@ -528,6 +528,10 @@ export class VaultRepository {
     await this.vault.assertConnected()
     await this.discoverProjects(true)
     await this.discoverChats(true)
+    return this.db.batch(() => this.populateIndex())
+  }
+
+  private async populateIndex(): Promise<RebuildStats> {
     this.db.clearContent()
     const projects = await this.listProjects()
     for (const project of projects) this.db.upsertProject(project)

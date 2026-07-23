@@ -57,6 +57,19 @@ export class IndexDatabase {
     return this.contentRebuildRequired
   }
 
+  async batch<T>(action: () => Promise<T>): Promise<T> {
+    if (this.db.isTransaction) return action()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const result = await action()
+      this.db.exec('COMMIT')
+      return result
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   clearContent(): void {
     this.transaction(() => {
       this.db.exec(`
@@ -928,6 +941,10 @@ export class IndexDatabase {
   }
 
   private transaction(action: () => void): void {
+    if (this.db.isTransaction) {
+      action()
+      return
+    }
     this.db.exec('BEGIN IMMEDIATE')
     try {
       action()
