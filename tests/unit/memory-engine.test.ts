@@ -197,6 +197,39 @@ describe('memory extraction and reconciliation', () => {
     expect(memory?.type).toBe('deadline')
     expect(memory?.valid_until).toBe('2026-09-15T00:00:00.000Z')
   })
+
+  it('keeps rejected, uncertain, corrected, and incomplete statements out of active completion state', () => {
+    const rejected = deterministicCandidates(
+      [{ role: 'user', messageId: source, content: 'We considered vendor A but rejected it.' }],
+      []
+    )
+    expect(rejected.some((candidate) => candidate.type === 'rejected_option')).toBe(true)
+    expect(rejected.some((candidate) => candidate.type === 'decision')).toBe(false)
+
+    for (const content of [
+      'We have not completed the migration.',
+      'We might have completed the migration.',
+      'The migration is only an idea, not final.'
+    ]) {
+      expect(
+        deterministicCandidates([{ role: 'user', messageId: source, content }], []).some(
+          (candidate) => candidate.type === 'completed_item' && candidate.represents_completed_work
+        )
+      ).toBe(false)
+    }
+
+    const correction = deterministicCandidates(
+      [
+        {
+          role: 'user',
+          messageId: source,
+          content: 'The old launch decision is no longer valid; the active quantity is 200 units.'
+        }
+      ],
+      []
+    )
+    expect(correction.some((candidate) => candidate.type === 'correction')).toBe(true)
+  })
 })
 
 function baseMemory(patch: Partial<Memory> = {}): Memory {

@@ -109,4 +109,33 @@ describe('vault and repository', () => {
       await harness.cleanup()
     }
   })
+
+  it('recovers a stale lock and reconnects to the same vault identity', async () => {
+    const harness = await createHarness()
+    const expectedId = harness.vault.identity.vault_id
+    try {
+      harness.repository.close()
+      harness.vault.disconnect()
+      await writeFile(
+        join(harness.directory, '.memorybridge.lock.json'),
+        JSON.stringify({
+          vault_id: expectedId,
+          pid: 999_999_999,
+          machine_id: 'stale-fixture',
+          application_version: '0.0.0',
+          acquired_at: '2000-01-01T00:00:00.000Z',
+          heartbeat_at: '2000-01-01T00:00:00.000Z'
+        })
+      )
+      const reconnected = new VaultManager()
+      expect(await reconnected.open(harness.directory)).toMatchObject({
+        connected: true,
+        writable: true,
+        manifest: { vault_id: expectedId }
+      })
+      reconnected.disconnect()
+    } finally {
+      await harness.cleanup()
+    }
+  })
 })

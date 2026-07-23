@@ -22,6 +22,17 @@ describe('OpenAI-compatible provider contracts', () => {
     expect(await collect(provider.streamChat({ model: 'test', messages: [] }))).toBe('hello world')
   })
 
+  it('falls back to a non-streaming JSON response and records the detected capability', async () => {
+    const base = await fakeServer((_request, response) =>
+      json(response, { choices: [{ message: { content: 'non-stream fallback' } }] })
+    )
+    const provider = createProvider(base)
+    expect(await collect(provider.streamChat({ model: 'test', messages: [] }))).toBe(
+      'non-stream fallback'
+    )
+    expect(provider.capabilities()).toMatchObject({ chat: true, streaming: false })
+  })
+
   it('rejects malformed and prematurely terminated SSE', async () => {
     const malformed = await fakeServer((_request, response) => {
       response.writeHead(200, { 'Content-Type': 'text/event-stream' })
@@ -66,6 +77,34 @@ describe('OpenAI-compatible provider contracts', () => {
     await expect(
       collect(createProvider(auth).streamChat({ model: 'test', messages: [] }))
     ).rejects.not.toThrow(/secret-secret/)
+  })
+
+  it('handles HTML errors and unsupported structured-output APIs without leaking response bodies', async () => {
+    const html = await fakeServer((_request, response) => {
+      response.writeHead(502, { 'Content-Type': 'text/html' })
+      response.end('<html><body>internal-proxy-secret</body></html>')
+    })
+    await expect(
+      collect(createProvider(html).streamChat({ model: 'test', messages: [] }))
+    ).rejects.toThrow(/status 502/i)
+    await expect(
+      collect(createProvider(html).streamChat({ model: 'test', messages: [] }))
+    ).rejects.not.toThrow(/internal-proxy-secret/i)
+
+    const unsupported = await fakeServer((_request, response) => {
+      response.writeHead(400, { 'Content-Type': 'application/json' })
+      response.end(
+        JSON.stringify({ error: { message: 'response_format json_schema unsupported' } })
+      )
+    })
+    await expect(
+      createProvider(unsupported).generateStructured({
+        model: 'test',
+        schemaName: 'answer',
+        schema: z.object({ answer: z.string() }),
+        messages: []
+      })
+    ).rejects.toThrow(/status 400.*json_schema unsupported/i)
   })
 
   it('handles timeout and caller cancellation', async () => {
@@ -142,6 +181,18 @@ describe('OpenAI-compatible provider contracts', () => {
       /invalid embeddings/i
     )
     await expect(createProvider(invalid).listModels()).rejects.toThrow(/model list/i)
+
+    const mismatched = await fakeServer((_request, response) =>
+      json(response, {
+        data: [
+          { index: 0, embedding: [1, 0] },
+          { index: 1, embedding: [1, 0, 0] }
+        ]
+      })
+    )
+    await expect(createProvider(mismatched).embed(['one', 'two'], 'embed')).rejects.toThrow(
+      /invalid embeddings/i
+    )
   })
 })
 
