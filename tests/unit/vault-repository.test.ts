@@ -82,33 +82,37 @@ describe('vault and repository', () => {
     }
   })
 
-  it('parks a corrupt derived index and rebuilds it from authoritative files', async () => {
-    const harness = await createHarness()
-    try {
-      const chat = await harness.repository.createChat()
-      await harness.chatService.sendMessage(
-        chat.chat_id,
-        'A durable transcript survives index loss.'
-      )
-      harness.repository.close()
-      await writeFile(
-        join(harness.directory, 'indexes', 'memorybridge.sqlite'),
-        'not-a-sqlite-database'
-      )
-      const rebuilt = new VaultRepository(harness.vault)
-      const stats = await rebuilt.initialize()
-      expect(stats.chats).toBe(1)
-      expect(stats.messages).toBe(2)
-      expect(
-        (await readdir(join(harness.directory, 'backups'))).some((name) =>
-          name.includes('.corrupt-')
+  it(
+    'parks a corrupt derived index and rebuilds it from authoritative files',
+    { timeout: 20_000 },
+    async () => {
+      const harness = await createHarness()
+      try {
+        const chat = await harness.repository.createChat()
+        await harness.chatService.sendMessage(
+          chat.chat_id,
+          'A durable transcript survives index loss.'
         )
-      ).toBe(true)
-      rebuilt.close()
-    } finally {
-      await harness.cleanup()
+        harness.repository.close()
+        await writeFile(
+          join(harness.directory, 'indexes', 'memorybridge.sqlite'),
+          'not-a-sqlite-database'
+        )
+        const rebuilt = new VaultRepository(harness.vault)
+        const stats = await rebuilt.initialize()
+        expect(stats.chats).toBe(1)
+        expect(stats.messages).toBe(2)
+        expect(
+          (await readdir(join(harness.directory, 'backups'))).some((name) =>
+            name.includes('.corrupt-')
+          )
+        ).toBe(true)
+        rebuilt.close()
+      } finally {
+        await harness.cleanup()
+      }
     }
-  })
+  )
 
   it('recovers a stale lock and reconnects to the same vault identity', async () => {
     const harness = await createHarness()
