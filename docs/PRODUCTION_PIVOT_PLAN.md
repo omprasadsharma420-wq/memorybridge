@@ -15,6 +15,8 @@ This is the execution record for the repository pivot requested on 2026-07-22.
 9. Added conservative provider capabilities and fake-server contracts.
 10. Reworked navigation and review UI for conversations, providers, projects, topics, memory, imports/sync, search, MCP, and vault settings.
 11. Expanded automated coverage and updated operating, privacy, security, migration, and handoff documentation.
+12. Added conservative project classification, persistent per-segment checkpoints, segment/chat/project/vault reprocessing, provider-memory review actions, provider-memory FTS, evidence roles and missing-source safety, entity co-occurrence indexing, and exact embedded MCP evidence.
+13. Verified a representative 200-chat/2,000-message vault, resumable failed-segment extraction, partial import recovery, real in-memory MCP transport, and the expanded local provider contract matrix.
 
 ## Release gate
 

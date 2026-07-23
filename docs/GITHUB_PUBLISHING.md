@@ -15,4 +15,4 @@ The workflow triggers on `main` and `codex/**`, uploads the unsigned NSIS instal
 
 ## Handoff link
 
-After push, use the branch or PR URL as the link to send to ChatGPT work. A local filesystem link is not portable to another ChatGPT task.
+Use the draft pull request <https://github.com/omprasadsharma420-wq/memorybridge/pull/2> as the link to send to ChatGPT work. A local filesystem link is not portable to another ChatGPT task. Verify its hosted checks after every pushed commit before calling it ready.

@@ -36,6 +36,6 @@ Streaming writes one complete initial message followed by content deltas/status 
 
 ## Processing and retrieval
 
-Only complete messages are authoritative by default. Full-chat processing deterministically segments by size, time gap, and topic shift; unchanged segment hashes are skipped. Extraction output is treated as a hint, then checked for source IDs, scope, target lifecycle, negation, uncertainty, completion evidence, and confirmation source.
+Only complete messages are authoritative by default. Full-chat processing deterministically segments by size, time gap, and topic shift. Stable content hashes and disk checkpoints skip complete work and retry failed or cancelled segments. One segment, chat, project, or vault can be reprocessed with progress and cancellation. Unassigned segments use a conservative deterministic classifier and remain unassigned when project evidence is ambiguous. Extraction output is treated as a hint, then checked for source IDs, scope, target lifecycle, negation, uncertainty, completion evidence, and confirmation source.
 
 Retrieval combines Unicode lexical match, optional semantic vectors, exact phrase, scope, entity signals, lifecycle, confirmation, pin, recency, type, and evidence quality. Separate budgets constrain recent chat, structured memory, transcript excerpts, extraction, segmentation, embeddings, and output.

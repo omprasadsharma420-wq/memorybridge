@@ -15,7 +15,7 @@ MemoryBridge builds a separate local stdio entry at `out/main/mcp-server.js`. Th
 - `list_projects`
 - `get_provider_memories`
 
-Results are capped at 50, excerpts are bounded, lifecycle defaults exclude rejected/superseded/deleted data, and every content result has a `memorybridge://` citation. Project, conversation, confirmed-global, and explicit all-project scope use the same isolation rules as the desktop app. Unscoped calls can see only confirmed global memory. Provider memories remain labeled review records.
+Results are capped at 50, excerpts are bounded, lifecycle defaults exclude rejected/superseded/deleted data, and memory results embed bounded exact evidence with its role, availability, source IDs, timestamp, and `memorybridge://` citation. Results also carry type, scope, lifecycle, project, source provider/chat, and supersession fields. Project, conversation, confirmed-global, and explicit all-project scope use the same isolation rules as the desktop app. Unscoped calls can see only confirmed global memory. Provider memories remain labeled review records.
 
 The server opens only the validated vault manifest and its derived SQLite index in query-only mode. It exposes no path argument, file read, directory list, shell, write, credential, transcript dump, or arbitrary SQL tool. Transport is local child-process stdio, not a listening network port.
 

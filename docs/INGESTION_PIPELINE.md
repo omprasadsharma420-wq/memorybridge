@@ -23,4 +23,6 @@ Archives are capped at 512 MB, individual decompressed ZIP entries at 100 MB, en
 
 ## Inbox and re-import
 
-Place supported files in `import-inbox`. A scan moves successful files to `imported` and failures to `failed-imports`; structured results live in `import-records`. Exact archive hashes return `unchanged`. Changed archives match conversations and messages by provider ID and update only changed records. Raw transcript files remain authoritative; all indexes are rebuildable.
+Place supported files in `import-inbox`. A scan moves successful files to `imported` and failures to `failed-imports`; structured results live in `import-records`. Import records retain completed and failed conversation indexes, bounded warnings/errors, and review counts. Retrying the same partial archive skips completed conversations and retries failed ones. Exact completed archive hashes return `unchanged`. Changed archives match conversations and messages by provider ID and update only changed records. Raw transcript files remain authoritative; all indexes are rebuildable.
+
+Imported provider memories and instructions retain provider record ID, source type, source label/reference, provider update time, scope, and content hash. They enter `needs_review` and are searchable as a separate source. Confirmation, edit, rejection, deletion, and same-scope supersession are explicit user actions; no provider record is silently promoted to trusted native memory.

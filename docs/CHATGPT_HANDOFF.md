@@ -6,6 +6,7 @@ This repository is ready to be opened by ChatGPT/Codex as a complete local proje
 
 - Product: MemoryBridge local-first universal AI memory layer.
 - Primary branch for this work: `codex/memorybridge-production-pivot`.
+- Draft pull request: <https://github.com/omprasadsharma420-wq/memorybridge/pull/2>.
 - Runtime: Electron, React, TypeScript, Zod, Node SQLite, fflate, MCP TypeScript SDK.
 - Raw vault data is authoritative; SQLite/FTS and embeddings are rebuildable.
 
@@ -41,4 +42,4 @@ Use generated fixtures only. Never request or commit a real ChatGPT export or AP
 
 ## Review focus
 
-Run the full release gate, inspect migrations against a copied synthetic v1 vault, exercise import preview/re-import/inbox UI, validate the MCP config in a compatible host, and review the PR for any accidental broad scope or real-user data. See `docs/MIGRATION_PLAN.md`, `docs/INGESTION_PIPELINE.md`, and `docs/MCP.md`.
+The 2026-07-23 local release gate passed with 61 unit/integration tests, one Electron UI test, zero audit vulnerabilities, production build, and a 102,077,714-byte Windows NSIS installer. Review hosted checks on the pull request, inspect migrations against copied synthetic data, exercise import preview/re-import/inbox UI, validate the MCP config in a compatible host, and review for accidental broad scope or real-user data. See `docs/REQUIREMENTS_MATRIX.md`, `docs/MIGRATION_PLAN.md`, `docs/INGESTION_PIPELINE.md`, and `docs/MCP.md`.

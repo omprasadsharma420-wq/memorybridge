@@ -16,6 +16,7 @@ chats/<chat-id>--<readable-slug>/
 evidence/<memory-id>.jsonl
 topics/<chat-id>.json
 provider-memories/<provider-memory-id>.json
+processing/<chat-id>.json                # resumable segment checkpoint
 import-inbox/ imported/ failed-imports/ import-records/
 connector-state/ attachments/ prompts/ migrations/ backups/ logs/
 indexes/memorybridge.sqlite
@@ -41,10 +42,10 @@ Scope is a discriminated union:
 - project — one exact project ID;
 - conversation — one exact chat ID.
 
-`MemoryEvidence` is first-class: evidence ID, memory ID, chat ID, message ID, provider, exact bounded excerpt, offsets, and time. A memory can therefore cite multiple messages across multiple chats.
+`MemoryEvidence` is first-class: evidence ID, memory ID, chat ID, message ID, segment ID, provider, evidence role, exact bounded excerpt, offsets, availability, and time. Roles distinguish support, confirmation, contradiction, supersession, and completion. A memory can therefore cite multiple messages across multiple chats; a missing indexed source is reported without discarding the retained citation.
 
 Temporal fields record validity bounds and precision. Embedding fields record missing/current/stale/failed state plus the statement hash used for the vector.
 
 ## Derived index
 
-SQLite contains projects, canonical chats/messages, memories, relationships, evidence, topics, import records, connector state, provider memories, temporal entries, embeddings, migrations, vault identity, and Unicode61 FTS tables. It uses DELETE journaling, FULL synchronous mode, foreign keys, a five-second busy timeout, and query-only mode in MCP. It is disposable and rebuildable.
+SQLite contains projects, canonical chats/messages, memories, explicit and co-occurrence entity relationships, evidence, classified topics, import records, connector state, provider memories and their FTS index, temporal entries, embeddings, migrations, vault identity, and Unicode61 FTS tables. It uses DELETE journaling, FULL synchronous mode, foreign keys, a five-second busy timeout, and query-only mode in MCP. It is disposable and rebuildable.

@@ -2,7 +2,9 @@
 
 ## Eligibility and segmentation
 
-Only complete messages are authoritative by default; failed, cancelled, interrupted, pending, and streaming content is retained but excluded. Turn extraction is bounded by an extraction character budget. Full-chat processing segments complete history deterministically by character budget, six-hour gaps, and topic shift, with bounded overlap. Segment hashes enable retry and changed-only processing; progress and cancellation are exposed through IPC.
+Only complete messages are authoritative by default; failed, cancelled, interrupted, pending, and streaming content is retained but excluded. Turn extraction is bounded by an extraction character budget. Full-chat processing segments complete history deterministically by character budget, six-hour gaps, and topic shift, with bounded overlap. Stable topic hashes preserve topic IDs. Per-chat checkpoint files record complete, failed, running, and cancelled segments plus attempts and safe error categories. Complete hashes are skipped, failed hashes retry, and forced segment runs remain available. Progress and cancellation are exposed for segment, chat, project, and vault scopes.
+
+An assigned chat inherits its project. An unassigned segment is classified only when exact project naming or distinctive overlap clears confidence and separation thresholds; ambiguous segments remain conversation-scoped. Reprocessing preserves explicit user-confirmed memories and surfaces new conflicts instead of silently deleting them.
 
 ## Candidate validation
 
@@ -21,7 +23,7 @@ The deterministic extractor covers decisions, agreements, completion, facts, pre
 
 Exact normalization and conservative keyword/entity comparison control duplicates. Numeric changes are not collapsed as duplicates. Supersession preserves both records and evidence. Confirmed memory is not silently replaced by unconfirmed candidates. Completion can close a related active commitment only inside the same scope.
 
-Every accepted source becomes a `MemoryEvidence` record. Duplicate evidence can come from another conversation. Edits and merges invalidate prior embeddings immediately; regenerated embeddings store the statement hash.
+Every accepted source becomes a `MemoryEvidence` record with its segment and semantic role. Duplicate evidence can come from the same or another conversation. Merges copy evidence to the surviving record. Edits and merges invalidate prior embeddings immediately; regenerated embeddings store the statement hash.
 
 ## Scope policy
 
