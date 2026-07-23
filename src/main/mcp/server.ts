@@ -1,11 +1,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
+import { chatIdSchema, memoryIdSchema, projectIdSchema } from '../../shared/schemas'
 import { McpQueryService, type McpScope } from './query-service'
 
 const scopeShape = {
-  projectId: z.string().optional().describe('MemoryBridge project ID'),
-  chatId: z.string().optional().describe('MemoryBridge conversation ID'),
+  projectId: projectIdSchema.optional().describe('MemoryBridge project ID'),
+  chatId: chatIdSchema.optional().describe('MemoryBridge conversation ID'),
   allProjects: z
     .boolean()
     .default(false)
@@ -15,6 +16,19 @@ const scopeShape = {
 
 export async function startMcpServer(vaultPath: string): Promise<void> {
   const query = await McpQueryService.open(vaultPath)
+  const server = createMcpServer(query)
+
+  const transport = new StdioServerTransport()
+  const close = async (): Promise<void> => {
+    query.close()
+    await server.close()
+  }
+  process.once('SIGINT', () => void close().finally(() => process.exit(0)))
+  process.once('SIGTERM', () => void close().finally(() => process.exit(0)))
+  await server.connect(transport)
+}
+
+export function createMcpServer(query: McpQueryService): McpServer {
   const server = new McpServer({ name: 'memorybridge', version: '0.2.0' })
 
   server.registerTool(
@@ -65,7 +79,7 @@ export async function startMcpServer(vaultPath: string): Promise<void> {
     {
       description: 'Get a bounded excerpt from one conversation; never dumps a whole vault.',
       inputSchema: {
-        chatId: z.string().min(1),
+        chatId: chatIdSchema,
         afterSequence: z.number().int().min(-1).default(-1),
         limit: z.number().int().min(1).max(50).default(20)
       }
@@ -78,7 +92,7 @@ export async function startMcpServer(vaultPath: string): Promise<void> {
     {
       description: 'Get exact bounded evidence for one memory.',
       inputSchema: {
-        memoryId: z.string().min(1),
+        memoryId: memoryIdSchema,
         limit: z.number().int().min(1).max(50).default(20)
       }
     },
@@ -102,14 +116,7 @@ export async function startMcpServer(vaultPath: string): Promise<void> {
     async ({ limit, ...scope }) => result(query.listProviderMemories(scope, limit))
   )
 
-  const transport = new StdioServerTransport()
-  const close = async (): Promise<void> => {
-    query.close()
-    await server.close()
-  }
-  process.once('SIGINT', () => void close().finally(() => process.exit(0)))
-  process.once('SIGTERM', () => void close().finally(() => process.exit(0)))
-  await server.connect(transport)
+  return server
 }
 
 function result(value: unknown): { content: Array<{ type: 'text'; text: string }> } {

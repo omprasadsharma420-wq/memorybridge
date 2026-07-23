@@ -6,7 +6,9 @@ import {
   memoryScopeSchema,
   memoryTypeSchema,
   messageIdSchema,
+  providerMemoryIdSchema,
   projectIdSchema,
+  topicIdSchema,
   settingsPatchSchema,
   type AppSettings,
   type Chat,
@@ -30,9 +32,9 @@ export interface VaultStatus {
 }
 
 export interface SearchResult {
-  kind: 'chat' | 'message' | 'memory'
+  kind: 'chat' | 'message' | 'memory' | 'provider_memory'
   id: string
-  chatId: string
+  chatId: string | null
   projectId: string | null
   title: string
   excerpt: string
@@ -103,11 +105,38 @@ export interface McpConfiguration {
   transport: 'stdio'
 }
 
+export interface ProviderConnectionResult {
+  ok: boolean
+  message: string
+  capabilities: {
+    chat: boolean
+    streaming: boolean
+    structuredOutput: boolean
+    embeddings: boolean
+    modelListing: boolean
+    cancellation: boolean
+  }
+}
+
 export interface ProcessingProgress {
-  chatId: string
+  scope: 'segment' | 'chat' | 'project' | 'vault'
+  scopeId: string
+  chatId: string | null
   status: 'running' | 'complete' | 'cancelled' | 'failed'
+  completedChats: number
+  totalChats: number
   completedSegments: number
   totalSegments: number
+}
+
+export interface ProcessingResult {
+  scope: 'segment' | 'chat' | 'project' | 'vault'
+  chats: number
+  segments: number
+  processedSegments: number
+  skippedSegments: number
+  failedSegments: number
+  memories: Memory[]
 }
 
 export const importTokenInputSchema = z.object({ token: z.uuid() })
@@ -150,6 +179,7 @@ export const searchInputSchema = z.object({
   memoryType: memoryTypeSchema.optional(),
   state: memoryStateSchema.optional(),
   provider: z.string().trim().min(1).max(120).optional(),
+  sourceType: z.enum(['conversation', 'memory', 'provider_memory']).optional(),
   topicId: z.string().trim().min(1).max(120).optional(),
   confirmedOnly: z.boolean().default(false).optional(),
   allProjects: z.boolean().default(false).optional(),
@@ -182,8 +212,31 @@ export const memoryActionInputSchema = z.discriminatedUnion('action', [
     replacementId: memoryIdSchema
   }),
   z.object({ memoryId: memoryIdSchema, action: z.literal('merge'), targetId: memoryIdSchema }),
-  z.object({ memoryId: memoryIdSchema, action: z.literal('set_scope'), scope: memoryScopeSchema })
+  z.object({ memoryId: memoryIdSchema, action: z.literal('set_scope'), scope: memoryScopeSchema }),
+  z.object({
+    memoryId: memoryIdSchema,
+    action: z.literal('resolve_conflict'),
+    resolution: z.enum(['confirm', 'reject'])
+  })
 ])
+export const providerMemoryActionInputSchema = z.discriminatedUnion('action', [
+  z.object({ providerMemoryId: providerMemoryIdSchema, action: z.literal('confirm') }),
+  z.object({ providerMemoryId: providerMemoryIdSchema, action: z.literal('reject') }),
+  z.object({ providerMemoryId: providerMemoryIdSchema, action: z.literal('delete') }),
+  z.object({
+    providerMemoryId: providerMemoryIdSchema,
+    action: z.literal('edit'),
+    statement: z.string().trim().min(1).max(4000)
+  }),
+  z.object({
+    providerMemoryId: providerMemoryIdSchema,
+    action: z.literal('supersede'),
+    replacementId: providerMemoryIdSchema
+  })
+])
+export const topicOnlyInputSchema = z.object({ topicId: topicIdSchema })
+export const projectOnlyInputSchema = z.object({ projectId: projectIdSchema })
+export const processingCancelInputSchema = z.object({ scopeId: z.string().min(1).max(500) })
 export const apiKeyInputSchema = z.object({ apiKey: z.string().trim().min(8).max(1000) })
 export const settingsInputSchema = settingsPatchSchema
 
@@ -195,6 +248,7 @@ export type SendMessageInput = z.infer<typeof sendMessageInputSchema>
 export type RetryMessageInput = z.infer<typeof retryMessageInputSchema>
 export type SearchInput = z.infer<typeof searchInputSchema>
 export type MemoryActionInput = z.infer<typeof memoryActionInputSchema>
+export type ProviderMemoryActionInput = z.infer<typeof providerMemoryActionInputSchema>
 
 export interface MemoryBridgeApi {
   bootstrap(): Promise<BootstrapState>
@@ -216,16 +270,14 @@ export interface MemoryBridgeApi {
   updateSettings(patch: unknown): Promise<AppSettings>
   saveApiKey(apiKey: string): Promise<void>
   clearApiKey(): Promise<void>
-  testConnection(): Promise<{ ok: boolean; message: string }>
+  testConnection(): Promise<ProviderConnectionResult>
   rebuildIndex(): Promise<{ projects: number; chats: number; messages: number; memories: number }>
   rerunExtraction(chatId: string): Promise<Memory[]>
-  reprocessChat(chatId: string): Promise<{
-    segments: number
-    processedSegments: number
-    skippedSegments: number
-    memories: Memory[]
-  }>
-  cancelReprocessing(chatId: string): Promise<void>
+  reprocessSegment(topicId: string): Promise<ProcessingResult>
+  reprocessChat(chatId: string): Promise<ProcessingResult>
+  reprocessProject(projectId: string): Promise<ProcessingResult>
+  reprocessVault(): Promise<ProcessingResult>
+  cancelReprocessing(scopeId: string): Promise<void>
   listConnectors(): Promise<ConnectorCapabilitiesView[]>
   chooseImport(): Promise<ImportPreviewResult | null>
   executeImport(input: ImportTokenInput): Promise<ImportRecord>
@@ -233,6 +285,7 @@ export interface MemoryBridgeApi {
   listTopics(chatId?: string): Promise<TopicSegment[]>
   listEvidence(memoryId?: string): Promise<MemoryEvidence[]>
   listProviderMemories(): Promise<ProviderMemory[]>
+  providerMemoryAction(input: ProviderMemoryActionInput): Promise<ProviderMemory[]>
   getMcpConfiguration(): Promise<McpConfiguration>
   exportDiagnostics(): Promise<DiagnosticResult>
   onStream(callback: (message: Message) => void): () => void

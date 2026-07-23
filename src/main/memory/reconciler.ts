@@ -17,6 +17,7 @@ export function reconcileMemories(
     projectId: string | null
     now?: string
     confirmationSource?: Memory['confirmation_source']
+    sourceProvider?: string
   }
 ): ReconciliationResult {
   const now = context.now ?? new Date().toISOString()
@@ -94,7 +95,8 @@ export function reconcileMemories(
       temporal_precision: temporal.precision,
       embedding_state: 'missing',
       embedding_content_hash: null,
-      source_provider: 'native'
+      source_provider: context.sourceProvider ?? 'native',
+      source_type: 'auto_extracted'
     }
     if (candidate.unresolved) newMemory.state = 'needs_review'
 

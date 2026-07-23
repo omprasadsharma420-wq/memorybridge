@@ -29,6 +29,7 @@ const VAULT_DIRECTORIES = [
   'evidence',
   'topics',
   'provider-memories',
+  'processing',
   'import-inbox',
   'imported',
   'failed-imports',

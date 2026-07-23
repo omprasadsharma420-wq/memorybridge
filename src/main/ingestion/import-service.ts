@@ -26,7 +26,19 @@ const SUPPORTED_EXTENSIONS = new Set(['.zip', '.json', '.jsonl', '.md', '.markdo
 interface CanonicalImport {
   connectorId: 'chatgpt-export' | 'generic-file'
   conversations: Array<{ chat: Chat; messages: Message[] }>
-  providerMemories: Array<{ statement: string; sourceLabel: string }>
+  providerMemories: Array<{
+    statement: string
+    sourceLabel: string
+    sourceType:
+      | 'provider_saved_memory'
+      | 'custom_instruction'
+      | 'project_instruction'
+      | 'workspace_instruction'
+      | 'provider_summary'
+      | 'other'
+    providerRecordId: string | null
+    providerUpdatedAt: string | null
+  }>
   warnings: string[]
 }
 
@@ -84,6 +96,13 @@ export class ImportService {
     }
 
     const parsed = await parseBytes(sourcePath, bytes)
+    const priorCompleted = new Set(
+      Array.isArray(previous?.checkpoint.completedIndexes)
+        ? previous.checkpoint.completedIndexes.filter(
+            (value): value is number => Number.isInteger(value) && value >= 0
+          )
+        : []
+    )
     const record = importRecordSchema.parse({
       import_id: createId('import'),
       connector_id: parsed.connectorId,
@@ -96,14 +115,22 @@ export class ImportService {
         (sum, conversation) => sum + conversation.messages.length,
         0
       ),
-      checkpoint: { nextConversation: 0 }
+      review_count: parsed.providerMemories.length + parsed.warnings.length,
+      checkpoint: { nextConversation: 0, completedIndexes: [...priorCompleted], failedIndexes: [] },
+      error_messages: [...parsed.warnings]
     })
     await this.repository.saveImportRecord(record)
     let imported = 0
     let changed = 0
     let skipped = 0
     let errors = 0
+    const errorMessages = [...parsed.warnings]
+    const failedIndexes: number[] = []
     for (let index = 0; index < parsed.conversations.length; index += 1) {
+      if (priorCompleted.has(index)) {
+        skipped += 1
+        continue
+      }
       try {
         const result = await this.repository.upsertCanonicalConversation(
           parsed.conversations[index]!.chat,
@@ -112,26 +139,51 @@ export class ImportService {
         if (result === 'imported') imported += 1
         else if (result === 'changed') changed += 1
         else skipped += 1
-      } catch {
+        priorCompleted.add(index)
+      } catch (error) {
         errors += 1
+        failedIndexes.push(index)
+        errorMessages.push(`Conversation ${index + 1}: ${safeImportMessage(error)}`)
       }
-      record.checkpoint = { nextConversation: index + 1 }
+      record.checkpoint = {
+        nextConversation: index + 1,
+        completedIndexes: [...priorCompleted],
+        failedIndexes
+      }
+      record.imported_count = imported
+      record.changed_count = changed
+      record.skipped_count = skipped
+      record.error_count = errors
+      record.error_messages = errorMessages.slice(0, 100)
+      await this.repository.saveImportRecord(record)
     }
+    const existingProviderHashes = new Set(
+      this.repository
+        .listProviderMemories()
+        .map((memory) => `${memory.provider}:${memory.content_hash}`)
+    )
     for (const item of parsed.providerMemories) {
       const contentHash = createHash('sha256').update(item.statement).digest('hex')
+      if (existingProviderHashes.has(`chatgpt:${contentHash}`)) continue
       await this.repository.saveProviderMemory(
         providerMemorySchema.parse({
           provider_memory_id: createId('pmem'),
           provider: 'chatgpt',
-          provider_record_id: null,
+          provider_record_id: item.providerRecordId,
+          source_type: item.sourceType,
           statement: item.statement,
           source_label: item.sourceLabel,
           scope: { kind: 'global' },
-          state: 'imported',
+          state: 'needs_review',
+          user_confirmed: false,
           imported_at: now,
+          provider_updated_at: item.providerUpdatedAt,
+          raw_source_reference: item.sourceLabel,
+          superseded_by: null,
           content_hash: contentHash
         })
       )
+      existingProviderHashes.add(`chatgpt:${contentHash}`)
     }
     const completed = importRecordSchema.parse({
       ...record,
@@ -141,7 +193,9 @@ export class ImportService {
       changed_count: changed,
       skipped_count: skipped,
       error_count: errors,
-      error_category: errors ? 'conversation-import-failed' : null
+      review_count: parsed.providerMemories.length + parsed.warnings.length,
+      error_category: errors ? 'conversation-import-failed' : null,
+      error_messages: errorMessages.slice(0, 100)
     })
     await this.repository.saveImportRecord(completed)
     return completed
@@ -170,7 +224,8 @@ export class ImportService {
           started_at: failedAt,
           completed_at: failedAt,
           error_count: 1,
-          error_category: safeErrorCategory(error)
+          error_category: safeErrorCategory(error),
+          error_messages: [safeImportMessage(error)]
         })
         await this.repository.saveImportRecord(failed)
         results.push(failed)
@@ -440,20 +495,53 @@ function textConversation(text: string, sourcePath: string): { chat: Chat; messa
   )
 }
 
-function parseProviderMemories(
-  bytes: Uint8Array
-): Array<{ statement: string; sourceLabel: string }> {
+function parseProviderMemories(bytes: Uint8Array): CanonicalImport['providerMemories'] {
   try {
     const raw = JSON.parse(strFromU8(bytes)) as unknown
     const values = Array.isArray(raw) ? raw : []
     return values.flatMap((value, index) => {
       const item = asRecord(value)
       const statement = stringValue(item.content) ?? stringValue(item.statement)
-      return statement ? [{ statement, sourceLabel: `ChatGPT export memory ${index + 1}` }] : []
+      const sourceType = providerMemorySourceType(stringValue(item.type))
+      return statement
+        ? [
+            {
+              statement,
+              sourceLabel: `ChatGPT export memory ${index + 1}`,
+              sourceType,
+              providerRecordId: stringValue(item.id),
+              providerUpdatedAt: nullableIso(item.updated_at ?? item.update_time)
+            }
+          ]
+        : []
     })
   } catch {
     return []
   }
+}
+
+function providerMemorySourceType(
+  value: string | null
+): CanonicalImport['providerMemories'][number]['sourceType'] {
+  const normalized = value?.toLowerCase().replace(/[\s-]+/g, '_')
+  if (normalized === 'custom_instruction') return 'custom_instruction'
+  if (normalized === 'project_instruction') return 'project_instruction'
+  if (normalized === 'workspace_instruction') return 'workspace_instruction'
+  if (normalized === 'provider_summary' || normalized === 'summary') return 'provider_summary'
+  if (normalized === 'provider_saved_memory' || normalized === 'memory' || !normalized)
+    return 'provider_saved_memory'
+  return 'other'
+}
+
+function nullableIso(value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  const parsed = toIso(value, '')
+  return parsed || null
+}
+
+function safeImportMessage(error: unknown): string {
+  if (error instanceof Error) return error.message.replace(/[\r\n]+/g, ' ').slice(0, 1000)
+  return 'Unknown import failure.'
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

@@ -50,8 +50,7 @@ export class McpQueryService {
     return (
       this.database
         .prepare(
-          `SELECT m.memory_id, m.type, m.statement, m.state, m.project_id, m.chat_id,
-                  m.evidence_ids, m.updated_at, c.title, bm25(memories_fts) AS rank
+          `SELECT m.*, c.title, bm25(memories_fts) AS rank
            FROM memories_fts JOIN memories m ON m.memory_id = memories_fts.memory_id
            JOIN chats c ON c.chat_id = m.chat_id
            WHERE memories_fts MATCH ? AND m.state NOT IN ('superseded','rejected','deleted')
@@ -59,7 +58,7 @@ export class McpQueryService {
            ORDER BY m.pinned DESC, m.user_confirmed DESC, rank LIMIT ?`
         )
         .all(terms, ...visible.values, boundedLimit(limit)) as Array<Record<string, unknown>>
-    ).map(citedMemory)
+    ).map((row) => this.citedMemory(row))
   }
 
   getMemoriesByType(types: string[], scope: McpScope = {}, limit = 20): unknown[] {
@@ -73,7 +72,7 @@ export class McpQueryService {
            ${visible.sql} ORDER BY m.pinned DESC, m.user_confirmed DESC, m.updated_at DESC LIMIT ?`
         )
         .all(...types, ...visible.values, boundedLimit(limit)) as Array<Record<string, unknown>>
-    ).map(citedMemory)
+    ).map((row) => this.citedMemory(row))
   }
 
   findRelatedConversations(query: string, scope: McpScope = {}, limit = 10): unknown[] {
@@ -135,8 +134,11 @@ export class McpQueryService {
     return (
       this.database
         .prepare(
-          `SELECT evidence_id, chat_id, message_id, provider, exact_excerpt, created_at
-           FROM memory_evidence WHERE memory_id = ? ORDER BY created_at LIMIT ?`
+          `SELECT e.evidence_id, e.chat_id, e.message_id, e.provider, e.exact_excerpt,
+                  e.segment_id, e.evidence_role, e.created_at,
+                  EXISTS(SELECT 1 FROM messages m WHERE m.message_id = e.message_id
+                         AND m.chat_id = e.chat_id) AS source_available
+           FROM memory_evidence e WHERE e.memory_id = ? ORDER BY e.created_at LIMIT ?`
         )
         .all(memoryId, boundedLimit(limit)) as Array<Record<string, unknown>>
     ).map((row) => ({
@@ -145,6 +147,9 @@ export class McpQueryService {
       messageId: String(row.message_id),
       provider: String(row.provider),
       excerpt: String(row.exact_excerpt).slice(0, 1000),
+      segmentId: row.segment_id ? String(row.segment_id) : null,
+      evidenceRole: String(row.evidence_role ?? 'supports'),
+      sourceAvailable: Boolean(row.source_available),
       createdAt: String(row.created_at),
       citation: `memorybridge://chat/${String(row.chat_id)}/message/${String(row.message_id)}`
     }))
@@ -162,7 +167,7 @@ export class McpQueryService {
   }
 
   listProviderMemories(scope: McpScope = {}, limit = 20): unknown[] {
-    const clauses = ["state != 'rejected'"]
+    const clauses = ["state NOT IN ('superseded','rejected','deleted')"]
     const values: Array<string | number> = []
     if (!scope.allProjects) {
       if (scope.projectId) {
@@ -176,11 +181,38 @@ export class McpQueryService {
     values.push(boundedLimit(limit))
     return this.database
       .prepare(
-        `SELECT provider_memory_id, provider, statement, source_label, scope_kind, scope_id,
-                state, imported_at FROM provider_memories
+        `SELECT provider_memory_id, provider, provider_record_id, source_type, statement,
+                source_label, scope_kind, scope_id, state, user_confirmed, imported_at,
+                provider_updated_at, raw_source_reference, superseded_by FROM provider_memories
          WHERE ${clauses.join(' AND ')} ORDER BY imported_at DESC LIMIT ?`
       )
       .all(...values)
+  }
+
+  private citedMemory(row: Record<string, unknown>): Record<string, unknown> {
+    const memoryId = String(row.memory_id)
+    const scopeKind = String(row.scope_kind ?? (row.project_id ? 'project' : 'conversation'))
+    return {
+      memoryId,
+      type: String(row.type),
+      statement: String(row.statement).slice(0, 1000),
+      state: String(row.state),
+      scope:
+        scopeKind === 'global'
+          ? { kind: 'global' }
+          : scopeKind === 'project'
+            ? { kind: 'project', projectId: String(row.scope_id ?? row.project_id) }
+            : { kind: 'conversation', chatId: String(row.scope_id ?? row.chat_id) },
+      projectId: row.project_id ? String(row.project_id) : null,
+      sourceProvider: String(row.source_provider ?? 'native'),
+      chatId: String(row.chat_id),
+      chatTitle: String(row.title),
+      updatedAt: String(row.updated_at),
+      supersedes: parseArray(row.supersedes),
+      supersededBy: row.superseded_by ? String(row.superseded_by) : null,
+      evidence: this.getMemoryEvidence(memoryId, 5),
+      citation: `memorybridge://chat/${String(row.chat_id)}/memory/${memoryId}`
+    }
   }
 }
 
@@ -206,20 +238,6 @@ function scopeSql(alias: string, scope: McpScope): { sql: string; values: string
   return { sql: `AND ${global}`, values: [] }
 }
 
-function citedMemory(row: Record<string, unknown>): Record<string, unknown> {
-  return {
-    memoryId: String(row.memory_id),
-    type: String(row.type),
-    statement: String(row.statement).slice(0, 1000),
-    state: String(row.state),
-    projectId: row.project_id ? String(row.project_id) : null,
-    chatId: String(row.chat_id),
-    chatTitle: String(row.title),
-    updatedAt: String(row.updated_at),
-    evidenceIds: parseArray(row.evidence_ids),
-    citation: `memorybridge://chat/${String(row.chat_id)}/memory/${String(row.memory_id)}`
-  }
-}
 function boundedLimit(value: number): number {
   return Math.max(1, Math.min(Math.trunc(value), 50))
 }

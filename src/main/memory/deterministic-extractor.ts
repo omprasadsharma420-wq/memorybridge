@@ -44,7 +44,10 @@ export function deterministicCandidates(
         continue
       }
 
-      if (/\bconsidered\b.+\b(?:decided|chose) not to\b/.test(lower)) {
+      if (
+        /\bconsidered\b.+\b(?:decided|chose) not to\b/.test(lower) ||
+        /\b(?:rejected|declined|ruled out)\b/.test(lower)
+      ) {
         candidates.push(candidate('rejected_option', sentence, source, 0.96, existing, true))
         continue
       }
@@ -75,7 +78,9 @@ export function deterministicCandidates(
       }
 
       if (
-        /\bno longer correct\b|\bpreviously\b.+\bnow\b|\bchanged from\b|\bcorrection\b/.test(lower)
+        /\bno longer (?:correct|valid|active)\b|\bpreviously\b.+\bnow\b|\bchanged from\b|\bcorrection\b/.test(
+          lower
+        )
       ) {
         candidates.push(candidate('correction', sentence, source, 0.88, existing, true))
         continue
@@ -159,12 +164,21 @@ function candidate(
 
 function isProposalOnly(lower: string): boolean {
   return (
-    /\b(?:could|might|maybe|may|what if|consider)\b/.test(lower) &&
-    !/\b(?:decided|confirmed|completed|submitted|agreed)\b/.test(lower)
+    /\b(?:could|might|maybe|may|possibly|what if|consider|only an idea)\b/.test(lower) &&
+    !/\b(?:decided|confirmed|agreed)\b/.test(lower)
   )
 }
 
 function isCompleted(lower: string): boolean {
+  if (
+    /\b(?:not|never|hardly)\b(?:\s+\w+){0,4}\s+\b(?:completed|submitted|delivered|implemented|finished|paid|resolved)\b/.test(
+      lower
+    ) ||
+    /\b(?:may|might|could|possibly)\b(?:\s+\w+){0,5}\s+\b(?:completed|submitted|delivered|implemented|finished|paid|resolved)\b/.test(
+      lower
+    )
+  )
+    return false
   return /\b(?:was|were|has been|have been|is now)?\s*(?:completed|submitted|delivered|implemented|finished|paid|resolved)\b/.test(
     lower
   )
@@ -192,11 +206,21 @@ function keywordSimilarity(left: string, right: string): number {
 }
 
 function deduplicateCandidates(candidates: MemoryCandidate[]): MemoryCandidate[] {
-  const seen = new Set<string>()
-  return candidates.filter((candidate) => {
+  const deduplicated = new Map<string, MemoryCandidate>()
+  for (const candidate of candidates) {
     const key = `${candidate.type}:${normalizeForComparison(candidate.statement)}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
+    const previous = deduplicated.get(key)
+    if (!previous) {
+      deduplicated.set(key, candidate)
+      continue
+    }
+    deduplicated.set(key, {
+      ...previous,
+      source_message_ids: [
+        ...new Set([...previous.source_message_ids, ...candidate.source_message_ids])
+      ],
+      confidence: Math.max(previous.confidence, candidate.confidence)
+    })
+  }
+  return [...deduplicated.values()]
 }

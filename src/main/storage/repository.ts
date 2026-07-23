@@ -11,6 +11,7 @@ import {
   topicSegmentSchema,
   importRecordSchema,
   providerMemorySchema,
+  processingCheckpointSchema,
   projectSchema,
   type Chat,
   type ExtractionRun,
@@ -20,7 +21,8 @@ import {
   type MemoryEvidence,
   type TopicSegment,
   type ImportRecord,
-  type ProviderMemory
+  type ProviderMemory,
+  type ProcessingCheckpoint
 } from '../../shared/schemas'
 import type { SearchInput, SearchResult } from '../../shared/contracts'
 import { slugify } from '../../shared/text'
@@ -210,6 +212,9 @@ export class VaultRepository {
       const reassigned = memories.map((memory) => ({
         ...memory,
         project_id: patch.projectId ?? null,
+        scope: patch.projectId
+          ? ({ kind: 'project', project_id: patch.projectId } as const)
+          : ({ kind: 'conversation', chat_id: chatId } as const),
         updated_at: new Date().toISOString()
       }))
       await this.replaceChatMemories(chatId, reassigned)
@@ -342,8 +347,25 @@ export class VaultRepository {
   }
 
   async saveEvidence(records: MemoryEvidence[]): Promise<void> {
+    const messagesByChat = new Map<string, Set<string>>()
+    for (const chatId of new Set(records.map((record) => record.chat_id))) {
+      messagesByChat.set(
+        chatId,
+        new Set((await this.readMessages(chatId)).map((message) => message.message_id))
+      )
+    }
+    const memoryIds = new Set((await this.listMemories()).map((memory) => memory.memory_id))
     for (const record of records) {
       const validated = memoryEvidenceSchema.parse(record)
+      if (!memoryIds.has(validated.memory_id)) {
+        throw new AppError('EVIDENCE_MEMORY_MISSING', 'Evidence must reference an existing memory.')
+      }
+      if (!messagesByChat.get(validated.chat_id)?.has(validated.message_id)) {
+        throw new AppError(
+          'EVIDENCE_MESSAGE_MISSING',
+          'Evidence must reference an existing message in the expected conversation.'
+        )
+      }
       await appendJsonLine(this.vault.path('evidence', `${validated.memory_id}.jsonl`), validated)
       this.db.upsertEvidence(validated)
     }
@@ -391,6 +413,32 @@ export class VaultRepository {
 
   listProviderMemories(): ProviderMemory[] {
     return this.db.listProviderMemories()
+  }
+
+  async getProviderMemory(providerMemoryId: string): Promise<ProviderMemory> {
+    const memory = this.listProviderMemories().find(
+      (item) => item.provider_memory_id === providerMemoryId
+    )
+    if (!memory)
+      throw new AppError('PROVIDER_MEMORY_NOT_FOUND', 'The provider memory no longer exists.')
+    return memory
+  }
+
+  async loadProcessingCheckpoint(chatId: string): Promise<ProcessingCheckpoint> {
+    await this.getChat(chatId)
+    const path = this.vault.path('processing', `${chatId}.json`)
+    if (await pathExists(path)) return readValidatedJson(path, processingCheckpointSchema)
+    return processingCheckpointSchema.parse({
+      schema_version: 1,
+      chat_id: chatId,
+      segments: {},
+      updated_at: new Date().toISOString()
+    })
+  }
+
+  async saveProcessingCheckpoint(checkpoint: ProcessingCheckpoint): Promise<void> {
+    const validated = processingCheckpointSchema.parse(checkpoint)
+    await atomicWriteJson(this.vault.path('processing', `${validated.chat_id}.json`), validated)
   }
 
   invalidateEmbedding(memoryId: string): void {

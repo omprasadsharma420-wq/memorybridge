@@ -114,6 +114,7 @@ export class RetrievalEngine {
         )
       for (const result of transcriptResults) {
         if (items.length >= settings.maximumRetrievedMemories) break
+        if (!result.chatId) continue
         const boundedExcerpt = result.excerpt.slice(0, settings.transcriptExcerptCharacterBudget)
         const cost = boundedExcerpt.length * 2
         if (usedCharacters + cost > settings.retrievalCharacterBudget) continue

@@ -31,6 +31,7 @@ export function App(): React.JSX.Element {
   const [panel, setPanel] = useState<Panel>('memory')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [activeProcessingScopeId, setActiveProcessingScopeId] = useState<string | null>(null)
   const [contextUsed, setContextUsed] = useState<RetrievedContextItem[]>([])
   const [contextExpanded, setContextExpanded] = useState(false)
   const [sourceMessageId, setSourceMessageId] = useState<string | null>(null)
@@ -53,9 +54,15 @@ export function App(): React.JSX.Element {
       setState((current) => (current ? { ...current, vault } : current))
     })
     const offProcessing = window.memoryBridge.onProcessingProgress((progress) => {
-      if (progress.status === 'running')
-        setNotice(`Processing segment ${progress.completedSegments} of ${progress.totalSegments}…`)
-      else if (progress.status === 'cancelled') setNotice('Full-chat processing cancelled safely.')
+      if (progress.status === 'running') {
+        setActiveProcessingScopeId(progress.scopeId)
+        setNotice(
+          `Processing ${progress.scope}: chat ${progress.completedChats + 1} of ${Math.max(progress.totalChats, 1)}, segment ${progress.completedSegments} of ${Math.max(progress.totalSegments, 1)}…`
+        )
+      } else {
+        setActiveProcessingScopeId(null)
+        if (progress.status === 'cancelled') setNotice('Processing cancelled safely.')
+      }
     })
     return () => {
       offStream()
@@ -315,6 +322,13 @@ export function App(): React.JSX.Element {
       {notice && (
         <div className="toast" role="status">
           {notice}
+          {activeProcessingScopeId && (
+            <button
+              onClick={() => void window.memoryBridge.cancelReprocessing(activeProcessingScopeId)}
+            >
+              Stop processing
+            </button>
+          )}
           <button onClick={() => setNotice(null)} aria-label="Dismiss">
             ×
           </button>
@@ -777,8 +791,8 @@ function Inspector({
       {panel === 'search' && (
         <SearchPanel projects={state.projects} chats={state.chats} onSelectChat={onSelectChat} />
       )}
-      {panel === 'providers' && <ProvidersPanel />}
-      {panel === 'topics' && <TopicsPanel selectedChatId={selectedChatId} />}
+      {panel === 'providers' && <ProvidersPanel onNotice={onNotice} />}
+      {panel === 'topics' && <TopicsPanel selectedChatId={selectedChatId} onNotice={onNotice} />}
       {panel === 'imports' && (
         <ImportPanel
           onImported={async () => {
@@ -928,6 +942,7 @@ function MemoryCard({
       item.project_id === memory.project_id &&
       (memory.project_id !== null || item.chat_id === memory.chat_id)
   )
+  const primaryEvidence = evidence[0]
   return (
     <article className="memory-card" data-state={memory.state}>
       <div className="memory-top">
@@ -972,17 +987,27 @@ function MemoryCard({
       </blockquote>
       <button
         className="source"
-        onClick={() => onSelectChat(memory.chat_id, memory.source_message_ids[0])}
+        disabled={primaryEvidence?.source_available === false}
+        onClick={() =>
+          onSelectChat(
+            primaryEvidence?.chat_id ?? memory.chat_id,
+            primaryEvidence?.message_id ?? memory.source_message_ids[0]
+          )
+        }
       >
-        ↗ {project?.name ?? 'Unassigned'} · {chat?.title ?? 'Source chat'} · exact message
+        {primaryEvidence?.source_available === false ? 'Source unavailable' : 'Open exact source'} ·{' '}
+        {primaryEvidence?.evidence_role ?? 'supports'} · {project?.name ?? 'Unassigned'} ·{' '}
+        {chat?.title ?? 'Source chat'}
       </button>
       {evidence.slice(1).map((record) => (
         <button
           className="source"
           key={record.evidence_id}
+          disabled={record.source_available === false}
           onClick={() => onSelectChat(record.chat_id, record.message_id)}
         >
-          ↗ Additional evidence · {record.provider} · exact message
+          {record.source_available === false ? 'Source unavailable' : 'Open additional evidence'} ·{' '}
+          {record.evidence_role} · {record.provider}
         </button>
       ))}
       <div className="memory-dates">
@@ -1040,6 +1065,32 @@ function MemoryCard({
         <button onClick={() => void act({ memoryId: memory.memory_id, action: 'delete' })}>
           Delete
         </button>
+        {(memory.state === 'disputed' || memory.type === 'unresolved_conflict') && (
+          <>
+            <button
+              onClick={() =>
+                void act({
+                  memoryId: memory.memory_id,
+                  action: 'resolve_conflict',
+                  resolution: 'confirm'
+                })
+              }
+            >
+              Resolve as current
+            </button>
+            <button
+              onClick={() =>
+                void act({
+                  memoryId: memory.memory_id,
+                  action: 'resolve_conflict',
+                  resolution: 'reject'
+                })
+              }
+            >
+              Resolve as rejected
+            </button>
+          </>
+        )}
         {targets.length > 0 && (
           <button onClick={() => setRelationship(relationship ? null : 'merge')}>Relate</button>
         )}
@@ -1080,7 +1131,7 @@ function MemoryCard({
   )
 }
 
-function ProvidersPanel(): React.JSX.Element {
+function ProvidersPanel({ onNotice }: { onNotice: (message: string) => void }): React.JSX.Element {
   const [connectors, setConnectors] = useState<ConnectorCapabilitiesView[]>([])
   const [providerMemories, setProviderMemories] = useState<ProviderMemory[]>([])
   useEffect(() => {
@@ -1092,6 +1143,16 @@ function ProvidersPanel(): React.JSX.Element {
       setProviderMemories(nextMemories)
     })
   }, [])
+  const act = async (
+    input: Parameters<typeof window.memoryBridge.providerMemoryAction>[0]
+  ): Promise<void> => {
+    try {
+      setProviderMemories(await window.memoryBridge.providerMemoryAction(input))
+      onNotice('Provider memory review saved.')
+    } catch (error) {
+      onNotice(errorMessage(error))
+    }
+  }
   return (
     <div className="panel-content">
       <div className="panel-heading">
@@ -1120,16 +1181,12 @@ function ProvidersPanel(): React.JSX.Element {
       </div>
       <h3>Provider memory records for review</h3>
       {providerMemories.map((memory) => (
-        <article className="memory-card" key={memory.provider_memory_id}>
-          <div className="memory-top">
-            <b>{memory.provider}</b>
-            <span className="state">{memory.state}</span>
-          </div>
-          <p>{memory.statement}</p>
-          <small>
-            {memory.source_label} · {memory.scope.kind} scope
-          </small>
-        </article>
+        <ProviderMemoryCard
+          key={memory.provider_memory_id}
+          memory={memory}
+          allMemories={providerMemories}
+          act={act}
+        />
       ))}
       {providerMemories.length === 0 && (
         <PanelEmpty
@@ -1142,7 +1199,120 @@ function ProvidersPanel(): React.JSX.Element {
   )
 }
 
-function TopicsPanel({ selectedChatId }: { selectedChatId: string | null }): React.JSX.Element {
+function ProviderMemoryCard({
+  memory,
+  allMemories,
+  act
+}: {
+  memory: ProviderMemory
+  allMemories: ProviderMemory[]
+  act: (input: Parameters<typeof window.memoryBridge.providerMemoryAction>[0]) => Promise<void>
+}): React.JSX.Element {
+  const [editing, setEditing] = useState(false)
+  const [statement, setStatement] = useState(memory.statement)
+  const [replacementId, setReplacementId] = useState('')
+  const targets = allMemories.filter(
+    (item) =>
+      item.provider_memory_id !== memory.provider_memory_id &&
+      item.state !== 'deleted' &&
+      JSON.stringify(item.scope) === JSON.stringify(memory.scope)
+  )
+  return (
+    <article className="memory-card">
+      <div className="memory-top">
+        <b>{memory.provider}</b>
+        <span className="state">{memory.state}</span>
+      </div>
+      {editing ? (
+        <div className="memory-editor">
+          <textarea value={statement} onChange={(event) => setStatement(event.target.value)} />
+          <div>
+            <button onClick={() => setEditing(false)}>Cancel</button>
+            <button
+              onClick={() =>
+                void act({
+                  providerMemoryId: memory.provider_memory_id,
+                  action: 'edit',
+                  statement
+                }).then(() => setEditing(false))
+              }
+            >
+              Save reviewed text
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p>{memory.statement}</p>
+      )}
+      <div className="memory-dates">
+        <span>Source: {memory.source_label}</span>
+        <span>Type: {memory.source_type.replaceAll('_', ' ')}</span>
+        <span>Scope: {memory.scope.kind}</span>
+        <span>User confirmed: {memory.user_confirmed ? 'yes' : 'no'}</span>
+        {memory.raw_source_reference && <span>Reference: {memory.raw_source_reference}</span>}
+      </div>
+      <div className="memory-actions">
+        {!memory.user_confirmed && memory.state !== 'deleted' && (
+          <button
+            onClick={() =>
+              void act({ providerMemoryId: memory.provider_memory_id, action: 'confirm' })
+            }
+          >
+            Confirm
+          </button>
+        )}
+        <button onClick={() => setEditing(true)}>Edit</button>
+        <button
+          onClick={() =>
+            void act({ providerMemoryId: memory.provider_memory_id, action: 'reject' })
+          }
+        >
+          Reject
+        </button>
+        <button
+          onClick={() =>
+            void act({ providerMemoryId: memory.provider_memory_id, action: 'delete' })
+          }
+        >
+          Delete
+        </button>
+      </div>
+      {targets.length > 0 && (
+        <div className="relationship-editor">
+          <select value={replacementId} onChange={(event) => setReplacementId(event.target.value)}>
+            <option value="">Choose superseding provider memory</option>
+            {targets.map((target) => (
+              <option key={target.provider_memory_id} value={target.provider_memory_id}>
+                {target.statement.slice(0, 70)}
+              </option>
+            ))}
+          </select>
+          <button
+            disabled={!replacementId}
+            onClick={() =>
+              replacementId &&
+              void act({
+                providerMemoryId: memory.provider_memory_id,
+                action: 'supersede',
+                replacementId
+              })
+            }
+          >
+            Mark superseded
+          </button>
+        </div>
+      )}
+    </article>
+  )
+}
+
+function TopicsPanel({
+  selectedChatId,
+  onNotice
+}: {
+  selectedChatId: string | null
+  onNotice: (message: string) => void
+}): React.JSX.Element {
   const [topics, setTopics] = useState<TopicSegment[]>([])
   useEffect(() => {
     void window.memoryBridge.listTopics(selectedChatId ?? undefined).then(setTopics)
@@ -1170,6 +1340,28 @@ function TopicsPanel({ selectedChatId }: { selectedChatId: string | null }): Rea
             {new Date(topic.started_at).toLocaleString()} →{' '}
             {new Date(topic.ended_at).toLocaleString()}
           </small>
+          <div className="memory-dates">
+            <span>
+              Project classification:{' '}
+              {topic.project_id
+                ? `${topic.project_id.slice(0, 16)}… (${Math.round((topic.project_confidence ?? 0) * 100)}%)`
+                : 'unassigned'}
+            </span>
+            {topic.project_reason && <span>{topic.project_reason}</span>}
+          </div>
+          <div className="memory-actions">
+            <button
+              onClick={async () => {
+                const result = await window.memoryBridge.reprocessSegment(topic.topic_id)
+                setTopics(await window.memoryBridge.listTopics(selectedChatId ?? undefined))
+                onNotice(
+                  `Segment processing complete: ${result.processedSegments} changed, ${result.failedSegments} failed.`
+                )
+              }}
+            >
+              Reprocess this segment
+            </button>
+          </div>
         </article>
       ))}
       {topics.length === 0 && (
@@ -1279,8 +1471,13 @@ function ImportPanel({
           </div>
           <p>
             {record.imported_count} added · {record.changed_count} changed · {record.skipped_count}{' '}
-            unchanged · {record.error_count} errors
+            unchanged · {record.review_count} requiring review · {record.error_count} errors
           </p>
+          {record.error_messages.map((message) => (
+            <small className="inline-error" key={message}>
+              {message}
+            </small>
+          ))}
         </article>
       ))}
     </div>
@@ -1338,6 +1535,9 @@ function SearchPanel({
   const [memoryType, setMemoryType] = useState<Memory['type'] | ''>('')
   const [memoryState, setMemoryState] = useState<Memory['state'] | ''>('')
   const [provider, setProvider] = useState('')
+  const [sourceType, setSourceType] = useState<'' | 'conversation' | 'memory' | 'provider_memory'>(
+    ''
+  )
   const [topicId, setTopicId] = useState('')
   const [topics, setTopics] = useState<TopicSegment[]>([])
   const [confirmedOnly, setConfirmedOnly] = useState(false)
@@ -1359,6 +1559,7 @@ function SearchPanel({
         memoryType: memoryType || undefined,
         state: memoryState || undefined,
         provider: provider || undefined,
+        sourceType: sourceType || undefined,
         topicId: topicId || undefined,
         confirmedOnly,
         fromDate: fromDate || undefined,
@@ -1440,6 +1641,20 @@ function SearchPanel({
               </option>
             ))}
           </select>
+          <select
+            aria-label="Source type"
+            value={sourceType}
+            onChange={(event) =>
+              setSourceType(
+                event.target.value as '' | 'conversation' | 'memory' | 'provider_memory'
+              )
+            }
+          >
+            <option value="">All source types</option>
+            <option value="conversation">Conversations and messages</option>
+            <option value="memory">MemoryBridge memories</option>
+            <option value="provider_memory">Provider memory</option>
+          </select>
           <select value={topicId} onChange={(event) => setTopicId(event.target.value)}>
             <option value="">All topics</option>
             {topics.map((topic) => (
@@ -1505,7 +1720,10 @@ function SearchPanel({
         {results.map((result) => (
           <button
             key={`${result.kind}-${result.id}`}
-            onClick={() => onSelectChat(result.chatId, result.sourceMessageIds[0])}
+            disabled={!result.chatId}
+            onClick={() => {
+              if (result.chatId) onSelectChat(result.chatId, result.sourceMessageIds[0])
+            }}
           >
             <span className="result-kind">{result.kind}</span>
             <b>{result.title}</b>
@@ -1548,6 +1766,12 @@ function SettingsPanel({
 }): React.JSX.Element {
   const [settings, setSettings] = useState(state.settings)
   const [apiKey, setApiKey] = useState('')
+  const [processingProjectId, setProcessingProjectId] = useState(
+    state.projects[0]?.project_id ?? ''
+  )
+  const [providerCapabilities, setProviderCapabilities] = useState<
+    Awaited<ReturnType<typeof window.memoryBridge.testConnection>>['capabilities'] | null
+  >(null)
   const save = async (): Promise<void> => {
     const saved = await window.memoryBridge.updateSettings(settings)
     onSettings(saved)
@@ -1633,7 +1857,11 @@ function SettingsPanel({
             Save key
           </button>
           <button
-            onClick={async () => onNotice((await window.memoryBridge.testConnection()).message)}
+            onClick={async () => {
+              const result = await window.memoryBridge.testConnection()
+              setProviderCapabilities(result.capabilities)
+              onNotice(result.message)
+            }}
           >
             Test
           </button>
@@ -1647,6 +1875,15 @@ function SettingsPanel({
             Clear key
           </button>
         </div>
+        {providerCapabilities && (
+          <div className="memory-dates">
+            {Object.entries(providerCapabilities).map(([name, available]) => (
+              <span key={name}>
+                {humanize(name)}: {available ? 'available' : 'not detected'}
+              </span>
+            ))}
+          </div>
+        )}
       </section>
       <section>
         <h3>Memory</h3>
@@ -1798,6 +2035,46 @@ function SettingsPanel({
             Reprocess full selected chat
           </button>
         )}
+        <label>
+          Project processing scope
+          <select
+            value={processingProjectId}
+            onChange={(event) => setProcessingProjectId(event.target.value)}
+          >
+            <option value="">Choose project</option>
+            {state.projects.map((project) => (
+              <option key={project.project_id} value={project.project_id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          disabled={!processingProjectId}
+          onClick={async () => {
+            if (!processingProjectId) return
+            const result = await window.memoryBridge.reprocessProject(processingProjectId)
+            onMemories(await window.memoryBridge.listMemories())
+            onBootstrap(await window.memoryBridge.bootstrap())
+            onNotice(
+              `Project processing complete: ${result.chats} chats, ${result.processedSegments} changed, ${result.failedSegments} failed.`
+            )
+          }}
+        >
+          Reprocess selected project
+        </button>
+        <button
+          onClick={async () => {
+            const result = await window.memoryBridge.reprocessVault()
+            onMemories(await window.memoryBridge.listMemories())
+            onBootstrap(await window.memoryBridge.bootstrap())
+            onNotice(
+              `Vault rebuild complete: ${result.chats} chats, ${result.processedSegments} changed, ${result.failedSegments} failed.`
+            )
+          }}
+        >
+          Rebuild derived memory for vault
+        </button>
         <button
           onClick={async () =>
             onNotice(`Diagnostics saved to ${(await window.memoryBridge.exportDiagnostics()).path}`)

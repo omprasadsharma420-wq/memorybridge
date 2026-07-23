@@ -47,6 +47,15 @@ export class OpenAICompatibleProvider implements AIProvider {
       },
       request.signal
     )
+    if (!(response.headers.get('content-type') ?? '').includes('text/event-stream')) {
+      const body = await parseJsonResponse<Record<string, unknown>>(response)
+      const content = extractMessageContent(body)
+      if (!content)
+        throw new AppError('PROVIDER_INVALID_OUTPUT', 'The provider returned no chat content.')
+      this.detected = { ...this.detected, chat: true, streaming: false }
+      yield content
+      return
+    }
     if (!response.body)
       throw new AppError('PROVIDER_EMPTY_STREAM', 'The provider returned no stream.', true)
     const reader = response.body.getReader()
@@ -164,7 +173,17 @@ export class OpenAICompatibleProvider implements AIProvider {
       data?: Array<{ embedding?: number[]; index?: number }>
     }>(response)
     const rows = [...(body.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-    if (rows.length !== texts.length || rows.some((row) => !Array.isArray(row.embedding))) {
+    const dimensions = rows[0]?.embedding?.length ?? 0
+    if (
+      rows.length !== texts.length ||
+      dimensions === 0 ||
+      rows.some(
+        (row) =>
+          !Array.isArray(row.embedding) ||
+          row.embedding.length !== dimensions ||
+          row.embedding.some((value) => typeof value !== 'number' || !Number.isFinite(value))
+      )
+    ) {
       throw new AppError('PROVIDER_INVALID_EMBEDDING', 'The provider returned invalid embeddings.')
     }
     this.detected = { ...this.detected, embeddings: true }

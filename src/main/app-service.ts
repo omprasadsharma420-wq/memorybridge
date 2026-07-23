@@ -1,7 +1,7 @@
 import { app, dialog, type BrowserWindow } from 'electron'
 import { join } from 'node:path'
 import { basename } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { platform, release } from 'node:os'
 import type {
   BootstrapState,
@@ -10,6 +10,8 @@ import type {
   CreateProjectInput,
   DiagnosticResult,
   MemoryActionInput,
+  ProcessingResult,
+  ProviderMemoryActionInput,
   RetryMessageInput,
   SearchInput,
   SearchResult,
@@ -210,27 +212,46 @@ export class AppService {
   }
 
   async memoryAction(input: MemoryActionInput): Promise<Memory[]> {
+    let result: Memory[]
     if (input.action === 'edit') {
-      return this.memory.applyAction(input.memoryId, {
+      result = await this.memory.applyAction(input.memoryId, {
         kind: 'edit',
         statement: input.statement,
         ...(input.type ? { type: input.type } : {})
       })
-    }
-    if (input.action === 'supersede') {
-      return this.memory.applyAction(input.memoryId, {
+    } else if (input.action === 'supersede') {
+      result = await this.memory.applyAction(input.memoryId, {
         kind: 'supersede',
         replacementId: input.replacementId
       })
-    }
-    if (input.action === 'merge') {
-      return this.memory.applyAction(input.memoryId, { kind: 'merge', targetId: input.targetId })
-    }
-    if (input.action === 'set_scope') {
+    } else if (input.action === 'merge') {
+      result = await this.memory.applyAction(input.memoryId, {
+        kind: 'merge',
+        targetId: input.targetId
+      })
+    } else if (input.action === 'set_scope') {
       if (input.scope.kind === 'project') await this.repo.getProject(input.scope.project_id)
-      return this.memory.applyAction(input.memoryId, { kind: 'set_scope', scope: input.scope })
+      result = await this.memory.applyAction(input.memoryId, {
+        kind: 'set_scope',
+        scope: input.scope
+      })
+    } else if (input.action === 'resolve_conflict') {
+      result = await this.memory.applyAction(input.memoryId, {
+        kind: 'resolve_conflict',
+        resolution: input.resolution
+      })
+    } else {
+      result = await this.memory.applyAction(input.memoryId, { kind: input.action })
     }
-    return this.memory.applyAction(input.memoryId, { kind: input.action })
+    if (input.action === 'edit' || input.action === 'merge') {
+      await this.memory.regenerateEmbedding(
+        input.action === 'merge' ? input.targetId : input.memoryId,
+        await this.getProvider(),
+        this.settings
+      )
+      result = await this.repo.listMemories()
+    }
+    return result
   }
 
   search(input: SearchInput): SearchResult[] {
@@ -250,9 +271,14 @@ export class AppService {
     await this.credentials.clear()
   }
 
-  async testConnection(): Promise<{ ok: boolean; message: string }> {
+  async testConnection(): Promise<{
+    ok: boolean
+    message: string
+    capabilities: ReturnType<AIProvider['capabilities']>
+  }> {
     const provider = await this.getProvider()
-    return provider.validateConfiguration()
+    const health = await provider.validateConfiguration()
+    return { ...health, capabilities: provider.capabilities() }
   }
 
   async rebuildIndex(): Promise<RebuildStats> {
@@ -263,56 +289,163 @@ export class AppService {
     return (await this.reprocessChat(chatId)).memories
   }
 
-  async reprocessChat(chatId: string): Promise<{
-    segments: number
-    processedSegments: number
-    skippedSegments: number
-    memories: Memory[]
-  }> {
-    this.processingControllers.get(chatId)?.abort()
+  async reprocessSegment(topicId: string): Promise<ProcessingResult> {
+    const topic = this.repo.listTopics().find((item) => item.topic_id === topicId)
+    if (!topic) throw new AppError('TOPIC_NOT_FOUND', 'The selected topic no longer exists.')
+    return this.processChats('segment', topicId, [await this.repo.getChat(topic.chat_id)], {
+      topicId,
+      force: true
+    })
+  }
+
+  async reprocessChat(chatId: string): Promise<ProcessingResult> {
+    return this.processChats('chat', chatId, [await this.repo.getChat(chatId)])
+  }
+
+  async reprocessProject(projectId: string): Promise<ProcessingResult> {
+    await this.repo.getProject(projectId)
+    const topicChatIds = new Set(
+      this.repo
+        .listTopics()
+        .filter((topic) => topic.project_id === projectId)
+        .map((topic) => topic.chat_id)
+    )
+    const chats = (await this.repo.listChats()).filter(
+      (chat) => chat.project_id === projectId || topicChatIds.has(chat.chat_id)
+    )
+    return this.processChats('project', projectId, chats)
+  }
+
+  async reprocessVault(): Promise<ProcessingResult> {
+    return this.processChats('vault', this.vault.identity.vault_id, await this.repo.listChats())
+  }
+
+  private async processChats(
+    scope: ProcessingResult['scope'],
+    scopeId: string,
+    chats: Chat[],
+    options: { topicId?: string; force?: boolean } = {}
+  ): Promise<ProcessingResult> {
+    this.processingControllers.get(scopeId)?.abort()
     const controller = new AbortController()
-    this.processingControllers.set(chatId, controller)
-    await this.repo.setChatProcessingState(chatId, 'processing')
+    this.processingControllers.set(scopeId, controller)
+    const combined: ProcessingResult = {
+      scope,
+      chats: chats.length,
+      segments: 0,
+      processedSegments: 0,
+      skippedSegments: 0,
+      failedSegments: 0,
+      memories: []
+    }
+    const provider = await this.getProvider()
+    let completedChats = 0
     try {
-      const result = await this.memory.reprocessChat(
-        chatId,
-        await this.getProvider(),
-        this.settings,
-        controller.signal,
-        (completedSegments, totalSegments) =>
-          this.window?.webContents.send('processing:progress', {
-            chatId,
-            status: 'running',
-            completedSegments,
-            totalSegments
-          })
-      )
+      for (const chat of chats) {
+        if (controller.signal.aborted) break
+        await this.repo.setChatProcessingState(chat.chat_id, 'processing')
+        const result = await this.memory.reprocessChat(
+          chat.chat_id,
+          provider,
+          this.settings,
+          controller.signal,
+          (completedSegments, totalSegments) =>
+            this.window?.webContents.send('processing:progress', {
+              scope,
+              scopeId,
+              chatId: chat.chat_id,
+              status: 'running',
+              completedChats,
+              totalChats: chats.length,
+              completedSegments:
+                combined.processedSegments + combined.skippedSegments + completedSegments,
+              totalSegments: combined.segments + totalSegments
+            }),
+          options.topicId && chat.chat_id === chats[0]?.chat_id ? options : {}
+        )
+        combined.segments += result.segments
+        combined.processedSegments += result.processedSegments
+        combined.skippedSegments += result.skippedSegments
+        combined.failedSegments += result.failedSegments
+        combined.memories.push(...result.memories)
+        completedChats += 1
+        await this.repo.setChatProcessingState(
+          chat.chat_id,
+          controller.signal.aborted
+            ? 'cancelled'
+            : result.failedSegments > 0
+              ? 'needs_review'
+              : 'processed'
+        )
+      }
       const cancelled = controller.signal.aborted
-      await this.repo.setChatProcessingState(chatId, cancelled ? 'cancelled' : 'processed')
       this.window?.webContents.send('processing:progress', {
-        chatId,
-        status: cancelled ? 'cancelled' : 'complete',
-        completedSegments: result.processedSegments + result.skippedSegments,
-        totalSegments: result.segments
+        scope,
+        scopeId,
+        chatId: null,
+        status: cancelled ? 'cancelled' : combined.failedSegments ? 'failed' : 'complete',
+        completedChats,
+        totalChats: chats.length,
+        completedSegments: combined.processedSegments + combined.skippedSegments,
+        totalSegments: combined.segments
       })
-      return result
+      return combined
     } catch (error) {
-      await this.repo.setChatProcessingState(chatId, 'failed')
+      for (const chat of chats.slice(completedChats)) {
+        await this.repo.setChatProcessingState(chat.chat_id, 'failed')
+      }
       this.window?.webContents.send('processing:progress', {
-        chatId,
+        scope,
+        scopeId,
+        chatId: null,
         status: 'failed',
-        completedSegments: 0,
-        totalSegments: 0
+        completedChats,
+        totalChats: chats.length,
+        completedSegments: combined.processedSegments + combined.skippedSegments,
+        totalSegments: combined.segments
       })
       throw error
     } finally {
-      if (this.processingControllers.get(chatId) === controller)
-        this.processingControllers.delete(chatId)
+      if (this.processingControllers.get(scopeId) === controller)
+        this.processingControllers.delete(scopeId)
     }
   }
 
-  cancelReprocessing(chatId: string): void {
-    this.processingControllers.get(chatId)?.abort()
+  cancelReprocessing(scopeId: string): void {
+    this.processingControllers.get(scopeId)?.abort()
+  }
+
+  async providerMemoryAction(input: ProviderMemoryActionInput): Promise<ProviderMemory[]> {
+    const memory = await this.repo.getProviderMemory(input.providerMemoryId)
+    if (input.action === 'confirm') {
+      memory.state = 'active'
+      memory.user_confirmed = true
+    } else if (input.action === 'edit') {
+      memory.statement = input.statement
+      memory.content_hash = createHash('sha256').update(input.statement).digest('hex')
+      memory.state = 'active'
+      memory.user_confirmed = true
+    } else if (input.action === 'reject') {
+      memory.state = 'rejected'
+      memory.user_confirmed = false
+    } else if (input.action === 'delete') {
+      memory.state = 'deleted'
+      memory.user_confirmed = false
+    } else {
+      const replacement = await this.repo.getProviderMemory(input.replacementId)
+      if (!sameProviderScope(memory, replacement)) {
+        throw new AppError(
+          'PROVIDER_MEMORY_SCOPE_MISMATCH',
+          'Provider memories can only supersede records in the same scope.'
+        )
+      }
+      memory.state = 'superseded'
+      memory.superseded_by = replacement.provider_memory_id
+      replacement.state = replacement.user_confirmed ? 'active' : 'needs_review'
+      await this.repo.saveProviderMemory(replacement)
+    }
+    await this.repo.saveProviderMemory(memory)
+    return this.repo.listProviderMemories()
   }
 
   listConnectors(): Array<{
@@ -535,4 +668,14 @@ export class AppService {
       throw new AppError('VAULT_DISCONNECTED', 'Connect a writable vault to import.', true)
     return this.importService
   }
+}
+
+function sameProviderScope(left: ProviderMemory, right: ProviderMemory): boolean {
+  if (left.scope.kind !== right.scope.kind) return false
+  if (left.scope.kind === 'global' && right.scope.kind === 'global') return true
+  if (left.scope.kind === 'project' && right.scope.kind === 'project')
+    return left.scope.project_id === right.scope.project_id
+  if (left.scope.kind === 'conversation' && right.scope.kind === 'conversation')
+    return left.scope.chat_id === right.scope.chat_id
+  return false
 }

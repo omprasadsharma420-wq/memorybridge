@@ -48,7 +48,7 @@ export const chatSchema = z.object({
   citation_count: z.number().int().nonnegative().default(0),
   sync_state: z.enum(['local', 'imported', 'current', 'changed', 'failed']).default('local'),
   processing_state: z
-    .enum(['unprocessed', 'processing', 'processed', 'failed', 'cancelled'])
+    .enum(['unprocessed', 'processing', 'processed', 'needs_review', 'failed', 'cancelled'])
     .default('unprocessed'),
   import_origin: z.string().max(1000).nullable().default(null),
   content_hash: z.string().max(128).nullable().default(null),
@@ -164,8 +164,20 @@ export const memorySchema = z.object({
     .optional(),
   embedding_state: z.enum(['missing', 'current', 'stale', 'failed']).default('missing').optional(),
   embedding_content_hash: z.string().max(128).nullable().default(null).optional(),
-  source_provider: z.string().min(1).default('native').optional()
+  source_provider: z.string().min(1).default('native').optional(),
+  source_type: z
+    .enum(['auto_extracted', 'manual', 'provider_memory'])
+    .default('auto_extracted')
+    .optional()
 })
+
+export const evidenceRoleSchema = z.enum([
+  'supports',
+  'confirms',
+  'contradicts',
+  'supersedes',
+  'completes'
+])
 
 export const memoryEvidenceSchema = z.object({
   evidence_id: evidenceIdSchema,
@@ -176,7 +188,10 @@ export const memoryEvidenceSchema = z.object({
   exact_excerpt: z.string().max(4000),
   start_offset: z.number().int().nonnegative().nullable().default(null),
   end_offset: z.number().int().nonnegative().nullable().default(null),
-  created_at: isoDate
+  segment_id: topicIdSchema.nullable().default(null),
+  evidence_role: evidenceRoleSchema.default('supports'),
+  created_at: isoDate,
+  source_available: z.boolean().default(true).optional()
 })
 
 export const memoryCandidateSchema = z.object({
@@ -226,7 +241,9 @@ export const topicSegmentSchema = z.object({
   ended_at: isoDate,
   entities: z.array(z.string().max(120)).default([]),
   character_count: z.number().int().nonnegative(),
-  content_hash: z.string().max(128)
+  content_hash: z.string().max(128),
+  project_confidence: z.number().min(0).max(1).nullable().default(null).optional(),
+  project_reason: z.string().max(500).nullable().default(null).optional()
 })
 
 export const importRecordSchema = z.object({
@@ -243,20 +260,57 @@ export const importRecordSchema = z.object({
   changed_count: z.number().int().nonnegative().default(0),
   skipped_count: z.number().int().nonnegative().default(0),
   error_count: z.number().int().nonnegative().default(0),
+  review_count: z.number().int().nonnegative().default(0),
   checkpoint: z.record(z.string(), z.unknown()).default({}),
-  error_category: z.string().max(120).nullable().default(null)
+  error_category: z.string().max(120).nullable().default(null),
+  error_messages: z.array(z.string().max(1000)).max(100).default([])
 })
+
+export const providerMemorySourceTypeSchema = z.enum([
+  'provider_saved_memory',
+  'custom_instruction',
+  'project_instruction',
+  'workspace_instruction',
+  'provider_summary',
+  'other'
+])
+
+const providerMemoryStateSchema = z.preprocess(
+  (value) => (value === 'imported' ? 'needs_review' : value === 'reviewed' ? 'active' : value),
+  z.enum(['active', 'superseded', 'rejected', 'deleted', 'needs_review'])
+)
 
 export const providerMemorySchema = z.object({
   provider_memory_id: providerMemoryIdSchema,
   provider: z.string().min(1),
   provider_record_id: z.string().max(500).nullable().default(null),
+  source_type: providerMemorySourceTypeSchema.default('provider_saved_memory'),
   statement: z.string().min(1).max(4000),
   source_label: z.string().min(1).max(500),
   scope: memoryScopeSchema,
-  state: z.enum(['imported', 'reviewed', 'rejected']).default('imported'),
+  state: providerMemoryStateSchema.default('needs_review'),
+  user_confirmed: z.boolean().default(false),
   imported_at: isoDate,
+  provider_updated_at: isoDate.nullable().default(null),
+  raw_source_reference: z.string().max(2000).nullable().default(null),
+  superseded_by: providerMemoryIdSchema.nullable().default(null),
   content_hash: z.string().max(128)
+})
+
+export const processingSegmentCheckpointSchema = z.object({
+  topic_id: topicIdSchema,
+  content_hash: z.string().max(128),
+  state: z.enum(['pending', 'running', 'complete', 'failed', 'cancelled']),
+  attempts: z.number().int().nonnegative().default(0),
+  error_category: z.string().max(120).nullable().default(null),
+  updated_at: isoDate
+})
+
+export const processingCheckpointSchema = z.object({
+  schema_version: z.literal(1),
+  chat_id: chatIdSchema,
+  segments: z.record(z.string(), processingSegmentCheckpointSchema).default({}),
+  updated_at: isoDate
 })
 
 export const registeredVaultSchema = z.object({
@@ -311,6 +365,7 @@ export type ExtractionRun = z.infer<typeof extractionRunSchema>
 export type TopicSegment = z.infer<typeof topicSegmentSchema>
 export type ImportRecord = z.infer<typeof importRecordSchema>
 export type ProviderMemory = z.infer<typeof providerMemorySchema>
+export type ProcessingCheckpoint = z.infer<typeof processingCheckpointSchema>
 export type RegisteredVault = z.infer<typeof registeredVaultSchema>
 export type AppSettings = z.infer<typeof appSettingsSchema>
 export type SettingsPatch = z.infer<typeof settingsPatchSchema>

@@ -18,7 +18,7 @@ import { excerpt } from '../../shared/text'
 import { ensureDirectory } from './file-utils'
 import { filterMemoriesForScope } from '../memory/scope'
 
-const SCHEMA_VERSION = 6
+const SCHEMA_VERSION = 7
 
 export class IndexDatabase {
   private database: DatabaseSync | null = null
@@ -70,6 +70,7 @@ export class IndexDatabase {
         DELETE FROM provider_memories;
         DELETE FROM temporal_index;
         DELETE FROM memory_entities;
+        DELETE FROM entity_relationships;
         DELETE FROM messages;
         DELETE FROM memories;
         DELETE FROM chats;
@@ -77,6 +78,7 @@ export class IndexDatabase {
         DELETE FROM messages_fts;
         DELETE FROM memories_fts;
         DELETE FROM chats_fts;
+        DELETE FROM provider_memories_fts;
       `)
     })
   }
@@ -216,13 +218,13 @@ export class IndexDatabase {
               created_at, updated_at, effective_at, supersedes, superseded_by, entities, tags,
               user_confirmed, pinned, scope_kind, scope_id, confirmation_source, evidence_ids,
               source_chat_ids, valid_from, valid_until, temporal_precision, embedding_state,
-              embedding_content_hash, source_provider)
+              embedding_content_hash, source_provider, source_type)
            VALUES
              (@memory_id, @type, @statement, @project_id, @chat_id, @source_message_ids, @state, @confidence,
               @created_at, @updated_at, @effective_at, @supersedes, @superseded_by, @entities, @tags,
               @user_confirmed, @pinned, @scope_kind, @scope_id, @confirmation_source, @evidence_ids,
               @source_chat_ids, @valid_from, @valid_until, @temporal_precision, @embedding_state,
-              @embedding_content_hash, @source_provider)
+              @embedding_content_hash, @source_provider, @source_type)
            ON CONFLICT(memory_id) DO UPDATE SET
              type=excluded.type, statement=excluded.statement, project_id=excluded.project_id,
              source_message_ids=excluded.source_message_ids, state=excluded.state, confidence=excluded.confidence,
@@ -235,7 +237,7 @@ export class IndexDatabase {
              valid_until=excluded.valid_until, temporal_precision=excluded.temporal_precision,
              embedding_state=excluded.embedding_state,
              embedding_content_hash=excluded.embedding_content_hash,
-             source_provider=excluded.source_provider`
+             source_provider=excluded.source_provider, source_type=excluded.source_type`
         )
         .run({
           memory_id: memory.memory_id,
@@ -272,7 +274,8 @@ export class IndexDatabase {
           temporal_precision: memory.temporal_precision ?? 'unknown',
           embedding_state: memory.embedding_state ?? 'missing',
           embedding_content_hash: memory.embedding_content_hash ?? null,
-          source_provider: memory.source_provider ?? 'native'
+          source_provider: memory.source_provider ?? 'native',
+          source_type: memory.source_type ?? 'auto_extracted'
         })
       this.db.prepare('DELETE FROM memories_fts WHERE memory_id = ?').run(memory.memory_id)
       this.db
@@ -298,10 +301,33 @@ export class IndexDatabase {
           .run(memory.memory_id, target, 'supersedes')
       }
       this.db.prepare('DELETE FROM memory_entities WHERE memory_id = ?').run(memory.memory_id)
+      this.db.prepare('DELETE FROM entity_relationships WHERE memory_id = ?').run(memory.memory_id)
       for (const entity of memory.entities) {
         this.db
           .prepare('INSERT OR REPLACE INTO memory_entities (memory_id, entity) VALUES (?, ?)')
           .run(memory.memory_id, entity)
+      }
+      for (let left = 0; left < memory.entities.length; left += 1) {
+        for (let right = left + 1; right < memory.entities.length; right += 1) {
+          this.db
+            .prepare(
+              `INSERT OR REPLACE INTO entity_relationships
+               (source_entity, target_entity, relationship, memory_id, scope_kind, scope_id, updated_at)
+               VALUES (?, ?, 'co_occurs', ?, ?, ?, ?)`
+            )
+            .run(
+              memory.entities[left]!,
+              memory.entities[right]!,
+              memory.memory_id,
+              memory.scope?.kind ?? (memory.project_id ? 'project' : 'conversation'),
+              memory.scope?.kind === 'project'
+                ? memory.scope.project_id
+                : memory.scope?.kind === 'conversation'
+                  ? memory.scope.chat_id
+                  : null,
+              memory.updated_at
+            )
+        }
       }
       this.db
         .prepare(
@@ -334,6 +360,7 @@ export class IndexDatabase {
         this.db.prepare('DELETE FROM embeddings WHERE memory_id = ?').run(row.memory_id)
         this.db.prepare('DELETE FROM temporal_index WHERE memory_id = ?').run(row.memory_id)
         this.db.prepare('DELETE FROM memory_entities WHERE memory_id = ?').run(row.memory_id)
+        this.db.prepare('DELETE FROM entity_relationships WHERE memory_id = ?').run(row.memory_id)
         this.db.prepare('DELETE FROM memories WHERE memory_id = ?').run(row.memory_id)
       }
     })
@@ -343,8 +370,10 @@ export class IndexDatabase {
     this.db
       .prepare(
         `INSERT OR REPLACE INTO extraction_runs
-          (extraction_id, chat_id, provider, model, status, created_at, source_message_ids, candidate_count, error_category)
-         VALUES (@extraction_id, @chat_id, @provider, @model, @status, @created_at, @source_message_ids, @candidate_count, @error_category)`
+          (extraction_id, chat_id, provider, model, status, created_at, source_message_ids,
+           candidate_count, error_category, checkpoint, total_segments)
+         VALUES (@extraction_id, @chat_id, @provider, @model, @status, @created_at,
+                 @source_message_ids, @candidate_count, @error_category, @checkpoint, @total_segments)`
       )
       .run({
         extraction_id: run.extraction_id,
@@ -355,7 +384,9 @@ export class IndexDatabase {
         created_at: run.created_at,
         candidate_count: run.candidate_count,
         source_message_ids: JSON.stringify(run.source_message_ids),
-        error_category: run.error_category ?? null
+        error_category: run.error_category ?? null,
+        checkpoint: run.checkpoint ?? 0,
+        total_segments: run.total_segments ?? 1
       })
   }
 
@@ -364,8 +395,8 @@ export class IndexDatabase {
       .prepare(
         `INSERT OR REPLACE INTO memory_evidence
          (evidence_id, memory_id, chat_id, message_id, provider, exact_excerpt,
-          start_offset, end_offset, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          start_offset, end_offset, segment_id, evidence_role, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         evidence.evidence_id,
@@ -376,6 +407,8 @@ export class IndexDatabase {
         evidence.exact_excerpt,
         evidence.start_offset,
         evidence.end_offset,
+        evidence.segment_id ?? null,
+        evidence.evidence_role ?? 'supports',
         evidence.created_at
       )
   }
@@ -384,9 +417,21 @@ export class IndexDatabase {
     const rows = (
       memoryId
         ? this.db
-            .prepare('SELECT * FROM memory_evidence WHERE memory_id = ? ORDER BY created_at')
+            .prepare(
+              `SELECT e.*, EXISTS(
+                 SELECT 1 FROM messages m WHERE m.message_id = e.message_id AND m.chat_id = e.chat_id
+               ) AS source_available
+               FROM memory_evidence e WHERE e.memory_id = ? ORDER BY e.created_at`
+            )
             .all(memoryId)
-        : this.db.prepare('SELECT * FROM memory_evidence ORDER BY created_at').all()
+        : this.db
+            .prepare(
+              `SELECT e.*, EXISTS(
+                 SELECT 1 FROM messages m WHERE m.message_id = e.message_id AND m.chat_id = e.chat_id
+               ) AS source_available
+               FROM memory_evidence e ORDER BY e.created_at`
+            )
+            .all()
     ) as Array<Record<string, unknown>>
     return rows.map((row) => ({
       evidence_id: String(row.evidence_id),
@@ -397,7 +442,10 @@ export class IndexDatabase {
       exact_excerpt: String(row.exact_excerpt),
       start_offset: row.start_offset === null ? null : Number(row.start_offset),
       end_offset: row.end_offset === null ? null : Number(row.end_offset),
-      created_at: String(row.created_at)
+      segment_id: row.segment_id ? String(row.segment_id) : null,
+      evidence_role: String(row.evidence_role ?? 'supports') as MemoryEvidence['evidence_role'],
+      created_at: String(row.created_at),
+      source_available: Boolean(row.source_available)
     }))
   }
 
@@ -406,7 +454,8 @@ export class IndexDatabase {
       .prepare(
         `INSERT OR REPLACE INTO topics
        (topic_id, chat_id, project_id, ordinal, label, message_ids, started_at, ended_at,
-        entities, character_count, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        entities, character_count, content_hash, project_confidence, project_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         topic.topic_id,
@@ -419,7 +468,9 @@ export class IndexDatabase {
         topic.ended_at,
         JSON.stringify(topic.entities),
         topic.character_count,
-        topic.content_hash
+        topic.content_hash,
+        topic.project_confidence ?? null,
+        topic.project_reason ?? null
       )
   }
 
@@ -446,7 +497,12 @@ export class IndexDatabase {
       ended_at: String(row.ended_at),
       entities: parseStringArray(row.entities),
       character_count: Number(row.character_count),
-      content_hash: String(row.content_hash)
+      content_hash: String(row.content_hash),
+      project_confidence:
+        row.project_confidence === null || row.project_confidence === undefined
+          ? null
+          : Number(row.project_confidence),
+      project_reason: row.project_reason ? String(row.project_reason) : null
     }))
   }
 
@@ -457,13 +513,14 @@ export class IndexDatabase {
       imported_count: record.imported_count,
       changed_count: record.changed_count,
       skipped_count: record.skipped_count,
-      error_count: record.error_count
+      error_count: record.error_count,
+      review_count: record.review_count
     }
     this.db
       .prepare(
         `INSERT OR REPLACE INTO import_records
        (import_id, connector_id, source_path, archive_hash, status, started_at, completed_at,
-        counters, checkpoint, error_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        counters, checkpoint, error_category, error_messages) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.import_id,
@@ -475,7 +532,8 @@ export class IndexDatabase {
         record.completed_at,
         JSON.stringify(counters),
         JSON.stringify(record.checkpoint),
-        record.error_category
+        record.error_category,
+        JSON.stringify(record.error_messages)
       )
   }
 
@@ -501,8 +559,10 @@ export class IndexDatabase {
       changed_count: counters.changed_count ?? 0,
       skipped_count: counters.skipped_count ?? 0,
       error_count: counters.error_count ?? 0,
+      review_count: counters.review_count ?? 0,
       checkpoint: JSON.parse(String(row.checkpoint)) as Record<string, unknown>,
-      error_category: row.error_category ? String(row.error_category) : null
+      error_category: row.error_category ? String(row.error_category) : null,
+      error_messages: parseStringArray(row.error_messages)
     }
   }
 
@@ -517,7 +577,9 @@ export class IndexDatabase {
       .prepare(
         `INSERT OR REPLACE INTO provider_memories
        (provider_memory_id, provider, provider_record_id, statement, source_label,
-        scope_kind, scope_id, state, imported_at, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        source_type, scope_kind, scope_id, state, user_confirmed, imported_at,
+        provider_updated_at, raw_source_reference, superseded_by, content_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         memory.provider_memory_id,
@@ -525,11 +587,31 @@ export class IndexDatabase {
         memory.provider_record_id,
         memory.statement,
         memory.source_label,
+        memory.source_type,
         memory.scope.kind,
         scopeId,
         memory.state,
+        memory.user_confirmed ? 1 : 0,
         memory.imported_at,
+        memory.provider_updated_at,
+        memory.raw_source_reference,
+        memory.superseded_by,
         memory.content_hash
+      )
+    this.db
+      .prepare('DELETE FROM provider_memories_fts WHERE provider_memory_id = ?')
+      .run(memory.provider_memory_id)
+    this.db
+      .prepare(
+        `INSERT INTO provider_memories_fts
+         (provider_memory_id, statement, provider, source_type, state) VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(
+        memory.provider_memory_id,
+        memory.statement,
+        memory.provider,
+        memory.source_type,
+        memory.state
       )
   }
 
@@ -542,6 +624,9 @@ export class IndexDatabase {
       provider_memory_id: String(row.provider_memory_id),
       provider: String(row.provider),
       provider_record_id: row.provider_record_id ? String(row.provider_record_id) : null,
+      source_type: String(
+        row.source_type ?? 'provider_saved_memory'
+      ) as ProviderMemory['source_type'],
       statement: String(row.statement),
       source_label: String(row.source_label),
       scope:
@@ -551,7 +636,11 @@ export class IndexDatabase {
             ? { kind: 'project', project_id: String(row.scope_id) }
             : { kind: 'conversation', chat_id: String(row.scope_id) },
       state: String(row.state) as ProviderMemory['state'],
+      user_confirmed: Boolean(row.user_confirmed),
       imported_at: String(row.imported_at),
+      provider_updated_at: row.provider_updated_at ? String(row.provider_updated_at) : null,
+      raw_source_reference: row.raw_source_reference ? String(row.raw_source_reference) : null,
+      superseded_by: row.superseded_by ? String(row.superseded_by) : null,
       content_hash: String(row.content_hash)
     }))
   }
@@ -619,17 +708,20 @@ export class IndexDatabase {
     if (!terms) return []
     const results: SearchResult[] = []
     const memoryFilters = buildFilters(input, 'm')
-    const memoryRows = this.db
-      .prepare(
-        `SELECT m.memory_id, m.chat_id, m.project_id, c.title, m.statement, m.type, m.state,
-                m.source_message_ids, m.created_at, bm25(memories_fts) AS rank
-         FROM memories_fts
-         JOIN memories m ON m.memory_id = memories_fts.memory_id
-         JOIN chats c ON c.chat_id = m.chat_id
-         WHERE memories_fts MATCH ? ${memoryFilters.sql}
-         ORDER BY rank LIMIT ?`
-      )
-      .all(terms, ...memoryFilters.values, input.limit) as Array<Record<string, unknown>>
+    const memoryRows =
+      input.sourceType && input.sourceType !== 'memory'
+        ? []
+        : (this.db
+            .prepare(
+              `SELECT m.memory_id, m.chat_id, m.project_id, c.title, m.statement, m.type, m.state,
+                      m.source_message_ids, m.created_at, bm25(memories_fts) AS rank
+               FROM memories_fts
+               JOIN memories m ON m.memory_id = memories_fts.memory_id
+               JOIN chats c ON c.chat_id = m.chat_id
+               WHERE memories_fts MATCH ? ${memoryFilters.sql}
+               ORDER BY rank LIMIT ?`
+            )
+            .all(terms, ...memoryFilters.values, input.limit) as Array<Record<string, unknown>>)
     for (const row of memoryRows) {
       results.push({
         kind: 'memory',
@@ -646,13 +738,75 @@ export class IndexDatabase {
       })
     }
 
-    if (input.memoryType || input.state) {
+    if ((!input.sourceType || input.sourceType === 'provider_memory') && !input.memoryType) {
+      const providerClauses = ['provider_memories_fts MATCH ?']
+      const providerValues: Array<string | number> = [terms]
+      if (!input.includeHistory)
+        providerClauses.push("p.state NOT IN ('superseded','rejected','deleted')")
+      if (input.provider) {
+        providerClauses.push('p.provider = ?')
+        providerValues.push(input.provider)
+      }
+      if (input.projectId) {
+        providerClauses.push(
+          "(p.scope_kind = 'global' OR (p.scope_kind = 'project' AND p.scope_id = ?))"
+        )
+        providerValues.push(input.projectId)
+      } else if (input.chatId) {
+        providerClauses.push(
+          "(p.scope_kind = 'global' OR (p.scope_kind = 'conversation' AND p.scope_id = ?))"
+        )
+        providerValues.push(input.chatId)
+      } else if (!input.allProjects) providerClauses.push("p.scope_kind = 'global'")
+      if (input.fromDate) {
+        providerClauses.push('p.imported_at >= ?')
+        providerValues.push(`${input.fromDate}T00:00:00.000Z`)
+      }
+      if (input.toDate) {
+        providerClauses.push('p.imported_at < ?')
+        providerValues.push(`${nextDate(input.toDate)}T00:00:00.000Z`)
+      }
+      providerValues.push(input.limit)
+      const providerRows = this.db
+        .prepare(
+          `SELECT p.*, bm25(provider_memories_fts) AS rank
+           FROM provider_memories_fts
+           JOIN provider_memories p
+             ON p.provider_memory_id = provider_memories_fts.provider_memory_id
+           WHERE ${providerClauses.join(' AND ')} ORDER BY rank LIMIT ?`
+        )
+        .all(...providerValues) as Array<Record<string, unknown>>
+      for (const row of providerRows) {
+        results.push({
+          kind: 'provider_memory',
+          id: String(row.provider_memory_id),
+          chatId: String(row.scope_kind) === 'conversation' ? String(row.scope_id) : null,
+          projectId: String(row.scope_kind) === 'project' ? String(row.scope_id) : null,
+          title: `${String(row.provider)} provider memory`,
+          excerpt: excerpt(String(row.statement)),
+          memoryType: null,
+          state: String(row.state),
+          sourceMessageIds: [],
+          score: 9 - Number(row.rank),
+          createdAt: String(row.imported_at)
+        })
+      }
+    }
+
+    if (
+      input.memoryType ||
+      input.state ||
+      input.sourceType === 'memory' ||
+      input.sourceType === 'provider_memory'
+    ) {
       return results.sort((a, b) => b.score - a.score).slice(0, input.limit)
     }
 
     if (!input.allProjects && !input.projectId && !input.chatId) {
       return results.sort((a, b) => b.score - a.score).slice(0, input.limit)
     }
+    if (input.sourceType && input.sourceType !== 'conversation')
+      return results.sort((a, b) => b.score - a.score).slice(0, input.limit)
     const projectClause = input.projectId ? ' AND c.project_id = ?' : ''
     const chatClause = input.chatId ? ' AND m.chat_id = ?' : ''
     const messageProviderClause = input.provider ? ' AND m.provider = ?' : ''
@@ -826,7 +980,8 @@ export class IndexDatabase {
         confirmation_source TEXT NOT NULL DEFAULT 'none', evidence_ids TEXT NOT NULL DEFAULT '[]',
         source_chat_ids TEXT NOT NULL DEFAULT '[]', valid_from TEXT, valid_until TEXT,
         temporal_precision TEXT NOT NULL DEFAULT 'unknown', embedding_state TEXT NOT NULL DEFAULT 'missing',
-        embedding_content_hash TEXT, source_provider TEXT NOT NULL DEFAULT 'native'
+        embedding_content_hash TEXT, source_provider TEXT NOT NULL DEFAULT 'native',
+        source_type TEXT NOT NULL DEFAULT 'auto_extracted'
       );
       CREATE TABLE IF NOT EXISTS memory_relationships (
         source_memory_id TEXT NOT NULL, target_memory_id TEXT NOT NULL, relationship TEXT NOT NULL,
@@ -835,7 +990,8 @@ export class IndexDatabase {
       CREATE TABLE IF NOT EXISTS extraction_runs (
         extraction_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
         status TEXT NOT NULL, created_at TEXT NOT NULL, source_message_ids TEXT NOT NULL,
-        candidate_count INTEGER NOT NULL, error_category TEXT
+        candidate_count INTEGER NOT NULL, error_category TEXT,
+        checkpoint INTEGER NOT NULL DEFAULT 0, total_segments INTEGER NOT NULL DEFAULT 1
       );
       CREATE TABLE IF NOT EXISTS embeddings (
         memory_id TEXT NOT NULL, model TEXT NOT NULL, vector TEXT NOT NULL, dimensions INTEGER NOT NULL,
@@ -845,25 +1001,31 @@ export class IndexDatabase {
       CREATE TABLE IF NOT EXISTS memory_evidence (
         evidence_id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, chat_id TEXT NOT NULL,
         message_id TEXT NOT NULL, provider TEXT NOT NULL, exact_excerpt TEXT NOT NULL,
-        start_offset INTEGER, end_offset INTEGER, created_at TEXT NOT NULL
+        start_offset INTEGER, end_offset INTEGER, segment_id TEXT,
+        evidence_role TEXT NOT NULL DEFAULT 'supports', created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS topics (
         topic_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, project_id TEXT, ordinal INTEGER NOT NULL,
         label TEXT NOT NULL, message_ids TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL,
-        entities TEXT NOT NULL, character_count INTEGER NOT NULL, content_hash TEXT NOT NULL
+        entities TEXT NOT NULL, character_count INTEGER NOT NULL, content_hash TEXT NOT NULL,
+        project_confidence REAL, project_reason TEXT
       );
       CREATE TABLE IF NOT EXISTS import_records (
         import_id TEXT PRIMARY KEY, connector_id TEXT NOT NULL, source_path TEXT NOT NULL,
         archive_hash TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,
-        completed_at TEXT, counters TEXT NOT NULL, checkpoint TEXT NOT NULL, error_category TEXT
+        completed_at TEXT, counters TEXT NOT NULL, checkpoint TEXT NOT NULL, error_category TEXT,
+        error_messages TEXT NOT NULL DEFAULT '[]'
       );
       CREATE TABLE IF NOT EXISTS connector_state (
         connector_id TEXT PRIMARY KEY, state TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS provider_memories (
         provider_memory_id TEXT PRIMARY KEY, provider TEXT NOT NULL, provider_record_id TEXT,
-        statement TEXT NOT NULL, source_label TEXT NOT NULL, scope_kind TEXT NOT NULL,
-        scope_id TEXT, state TEXT NOT NULL, imported_at TEXT NOT NULL, content_hash TEXT NOT NULL
+        statement TEXT NOT NULL, source_label TEXT NOT NULL,
+        source_type TEXT NOT NULL DEFAULT 'provider_saved_memory', scope_kind TEXT NOT NULL,
+        scope_id TEXT, state TEXT NOT NULL, user_confirmed INTEGER NOT NULL DEFAULT 0,
+        imported_at TEXT NOT NULL, provider_updated_at TEXT, raw_source_reference TEXT,
+        superseded_by TEXT, content_hash TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS temporal_index (
         memory_id TEXT PRIMARY KEY, valid_from TEXT, valid_until TEXT, precision TEXT NOT NULL
@@ -873,9 +1035,17 @@ export class IndexDatabase {
         PRIMARY KEY (memory_id, entity)
       );
       CREATE INDEX IF NOT EXISTS memory_entities_entity ON memory_entities(entity);
+      CREATE TABLE IF NOT EXISTS entity_relationships (
+        source_entity TEXT NOT NULL, target_entity TEXT NOT NULL, relationship TEXT NOT NULL,
+        memory_id TEXT NOT NULL, scope_kind TEXT NOT NULL, scope_id TEXT, updated_at TEXT NOT NULL,
+        PRIMARY KEY (source_entity, target_entity, relationship, memory_id)
+      );
+      CREATE INDEX IF NOT EXISTS entity_relationships_source ON entity_relationships(source_entity);
+      CREATE INDEX IF NOT EXISTS entity_relationships_target ON entity_relationships(target_entity);
       CREATE VIRTUAL TABLE IF NOT EXISTS chats_fts USING fts5(chat_id UNINDEXED, title, project_id UNINDEXED, tokenize='unicode61 remove_diacritics 2');
       CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(message_id UNINDEXED, content, chat_id UNINDEXED, project_id UNINDEXED, tokenize='unicode61 remove_diacritics 2');
       CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(memory_id UNINDEXED, statement, type, state, project_id UNINDEXED, chat_id UNINDEXED, tokenize='unicode61 remove_diacritics 2');
+      CREATE VIRTUAL TABLE IF NOT EXISTS provider_memories_fts USING fts5(provider_memory_id UNINDEXED, statement, provider, source_type, state, tokenize='unicode61 remove_diacritics 2');
     `)
     const priorVersion = this.db
       .prepare("SELECT version FROM index_versions WHERE name = 'main'")
@@ -919,8 +1089,33 @@ export class IndexDatabase {
       ['temporal_precision', "TEXT NOT NULL DEFAULT 'unknown'"],
       ['embedding_state', "TEXT NOT NULL DEFAULT 'missing'"],
       ['embedding_content_hash', 'TEXT'],
-      ['source_provider', "TEXT NOT NULL DEFAULT 'native'"]
+      ['source_provider', "TEXT NOT NULL DEFAULT 'native'"],
+      ['source_type', "TEXT NOT NULL DEFAULT 'auto_extracted'"]
     ])
+    ensureColumns(this.db, 'memory_evidence', [
+      ['segment_id', 'TEXT'],
+      ['evidence_role', "TEXT NOT NULL DEFAULT 'supports'"]
+    ])
+    ensureColumns(this.db, 'topics', [
+      ['project_confidence', 'REAL'],
+      ['project_reason', 'TEXT']
+    ])
+    ensureColumns(this.db, 'import_records', [['error_messages', "TEXT NOT NULL DEFAULT '[]'"]])
+    ensureColumns(this.db, 'provider_memories', [
+      ['source_type', "TEXT NOT NULL DEFAULT 'provider_saved_memory'"],
+      ['user_confirmed', 'INTEGER NOT NULL DEFAULT 0'],
+      ['provider_updated_at', 'TEXT'],
+      ['raw_source_reference', 'TEXT'],
+      ['superseded_by', 'TEXT']
+    ])
+    ensureColumns(this.db, 'extraction_runs', [
+      ['checkpoint', 'INTEGER NOT NULL DEFAULT 0'],
+      ['total_segments', 'INTEGER NOT NULL DEFAULT 1']
+    ])
+    this.db
+      .prepare("UPDATE provider_memories SET state = 'needs_review' WHERE state = 'imported'")
+      .run()
+    this.db.prepare("UPDATE provider_memories SET state = 'active' WHERE state = 'reviewed'").run()
     this.db
       .prepare('INSERT OR IGNORE INTO migration_state (version, applied_at) VALUES (?, ?)')
       .run(SCHEMA_VERSION, new Date().toISOString())
@@ -1034,7 +1229,8 @@ function rowToMemory(row: Record<string, unknown>): Memory {
     temporal_precision: String(row.temporal_precision ?? 'unknown') as Memory['temporal_precision'],
     embedding_state: String(row.embedding_state ?? 'missing') as Memory['embedding_state'],
     embedding_content_hash: row.embedding_content_hash ? String(row.embedding_content_hash) : null,
-    source_provider: String(row.source_provider ?? 'native')
+    source_provider: String(row.source_provider ?? 'native'),
+    source_type: String(row.source_type ?? 'auto_extracted') as Memory['source_type']
   }
 }
 
