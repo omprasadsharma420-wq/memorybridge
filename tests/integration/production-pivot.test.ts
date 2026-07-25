@@ -304,7 +304,7 @@ describe('production pivot integrity', () => {
       expect(preview).toMatchObject({
         connectorId: 'chatgpt-export',
         conversations: 2,
-        messages: 4,
+        messages: 3,
         providerMemories: 1
       })
       expect(preview.warnings).toHaveLength(1)
@@ -325,12 +325,12 @@ describe('production pivot integrity', () => {
       ).toHaveLength(1)
 
       const query = await McpQueryService.open(harness.directory)
-      expect(JSON.stringify(query.getChatExcerpt(importedChat.chat_id, -1, 5))).toContain(
-        'memorybridge://chat/'
-      )
-      expect(JSON.stringify(query.getChatExcerpt(importedChat.chat_id, -1, 5))).not.toContain(
-        harness.directory
-      )
+      expect(
+        JSON.stringify(query.getChatExcerpt(importedChat.chat_id, { allProjects: true }, -1, 5))
+      ).toContain('memorybridge://chat/')
+      expect(
+        JSON.stringify(query.getChatExcerpt(importedChat.chat_id, { allProjects: true }, -1, 5))
+      ).not.toContain(harness.directory)
       query.close()
     } finally {
       await harness.cleanup()
@@ -411,16 +411,16 @@ describe('production pivot integrity', () => {
     }
   })
 
-  it('handles lock conflicts as read-only and migrates a v1 manifest with backup', async () => {
+  it('labels lock conflicts honestly and migrates a v1 manifest with backup', async () => {
     const harness = await createHarness()
     try {
       const second = new VaultManager()
       const conflict = await second.open(harness.directory)
-      expect(conflict).toMatchObject({ connected: true, writable: false, reason: 'read-only' })
-      second.disconnect()
+      expect(conflict).toMatchObject({ connected: true, writable: false, reason: 'locked' })
+      await second.disconnect()
 
       harness.repository.close()
-      harness.vault.disconnect()
+      await harness.vault.disconnect()
       const manifestPath = join(harness.directory, 'memorybridge.vault.json')
       const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
       await writeFile(
@@ -432,7 +432,7 @@ describe('production pivot integrity', () => {
       expect(
         (await readdir(join(harness.directory, 'backups'))).some((name) => name.includes('pre-v2'))
       ).toBe(true)
-      migrated.disconnect()
+      await migrated.disconnect()
     } finally {
       await harness.cleanup()
     }
@@ -445,6 +445,7 @@ function chatGptZip(answer: string): Uint8Array {
       id: 'conv-1',
       title: 'Synthetic branch',
       create_time: 1_700_000_000,
+      current_node: 'assistant-1',
       mapping: {
         root: { id: 'root', parent: null, children: ['user-1'], message: null },
         'user-1': {
@@ -488,6 +489,7 @@ function chatGptZip(answer: string): Uint8Array {
     {
       id: 'conv-2',
       title: 'Second chat',
+      current_node: 'only',
       mapping: {
         only: {
           parent: null,

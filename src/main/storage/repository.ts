@@ -1,4 +1,5 @@
-import { readdir, rename } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { copyFile, readFile, readdir, rename, rm } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { z } from 'zod'
 import { createId } from '../../shared/ids'
@@ -30,6 +31,7 @@ import { AppError } from '../errors'
 import {
   appendJsonLine,
   atomicWriteJson,
+  atomicWriteText,
   ensureDirectory,
   pathExists,
   readJsonLines,
@@ -65,9 +67,10 @@ export class VaultRepository {
 
   async initialize(): Promise<RebuildStats> {
     await this.vault.assertConnected()
+    const migration = await this.migrateLegacyMemoryProvenance()
     this.index?.close()
     const indexPath = this.vault.path('indexes', 'memorybridge.sqlite')
-    let rebuildRequired = !(await pathExists(indexPath))
+    let rebuildRequired = migration.performed || !(await pathExists(indexPath))
     this.index = new IndexDatabase(indexPath)
     try {
       await this.index.open()
@@ -402,6 +405,87 @@ export class VaultRepository {
     return this.db.findImportByHash(hash)
   }
 
+  async listImportRecords(): Promise<ImportRecord[]> {
+    const records: ImportRecord[] = []
+    for (const entry of await readdir(this.vault.path('import-records'), {
+      withFileTypes: true
+    })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      records.push(
+        await readValidatedJson(this.vault.path('import-records', entry.name), importRecordSchema)
+      )
+    }
+    return records.sort((left, right) => right.started_at.localeCompare(left.started_at))
+  }
+
+  async validateImport(importId: string): Promise<ImportRecord> {
+    const record = (await this.listImportRecords()).find((item) => item.import_id === importId)
+    if (!record) throw new AppError('IMPORT_NOT_FOUND', 'The import record no longer exists.')
+    const issues: string[] = []
+    const conversationKeys = new Set(
+      Array.isArray(record.checkpoint.conversationKeys)
+        ? record.checkpoint.conversationKeys.filter(
+            (value): value is string => typeof value === 'string'
+          )
+        : []
+    )
+    const chats = (await this.listChats()).filter((chat) => {
+      const key = `${chat.source_provider}:${chat.source_conversation_id ?? chat.chat_id}`
+      return conversationKeys.size > 0
+        ? conversationKeys.has(key)
+        : chat.import_origin === record.source_path
+    })
+    const providerConversationKeys = new Set<string>()
+    const allMessages = new Map<string, Message>()
+    for (const chat of chats) {
+      const conversationKey = `${chat.source_provider}:${chat.source_conversation_id ?? chat.chat_id}`
+      if (providerConversationKeys.has(conversationKey))
+        issues.push(`Duplicate provider conversation identity: ${chat.chat_id}`)
+      providerConversationKeys.add(conversationKey)
+      const messages = await this.readMessages(chat.chat_id)
+      const providerMessageIds = new Set<string>()
+      let previousSequence = -1
+      for (const message of messages) {
+        allMessages.set(message.message_id, message)
+        if (message.sequence < previousSequence)
+          issues.push(`Message order is not coherent in conversation ${chat.chat_id}.`)
+        previousSequence = message.sequence
+        if (message.provider_message_id) {
+          if (providerMessageIds.has(message.provider_message_id))
+            issues.push(`Duplicate provider message identity in conversation ${chat.chat_id}.`)
+          providerMessageIds.add(message.provider_message_id)
+        }
+      }
+      for (const message of messages.filter((item) => item.status === 'complete')) {
+        if (
+          message.parent_message_id &&
+          message.sequence > 0 &&
+          !providerMessageIds.has(message.parent_message_id)
+        ) {
+          issues.push(`A parent message is missing in conversation ${chat.chat_id}.`)
+        }
+      }
+      if (this.db.countMessages(chat.chat_id) !== messages.length)
+        issues.push(`The index count does not match conversation ${chat.chat_id}.`)
+    }
+    for (const evidence of this.listEvidence()) {
+      const message = allMessages.get(evidence.message_id)
+      if (
+        chats.some((chat) => chat.chat_id === evidence.chat_id) &&
+        (!message || message.chat_id !== evidence.chat_id)
+      ) {
+        issues.push(`Evidence ${evidence.evidence_id} points to a missing source message.`)
+      }
+    }
+    const updated = importRecordSchema.parse({
+      ...record,
+      validation_status: issues.length === 0 ? 'passed' : 'warnings',
+      validation_issues: [...new Set(issues)].slice(0, 100)
+    })
+    await this.saveImportRecord(updated)
+    return updated
+  }
+
   async saveProviderMemory(memory: ProviderMemory): Promise<void> {
     const validated = providerMemorySchema.parse(memory)
     await atomicWriteJson(
@@ -483,6 +567,9 @@ export class VaultRepository {
         message
       ])
     )
+    const incomingKeys = new Set(
+      messages.map((message) => message.provider_message_id ?? message.message_id)
+    )
     for (const incoming of messages) {
       const key = incoming.provider_message_id ?? incoming.message_id
       const previous = prior.get(key)
@@ -494,6 +581,15 @@ export class VaultRepository {
       const fingerprint = message.content_hash ?? message.content
       if ((previous?.content_hash ?? previous?.content) === fingerprint) continue
       await this.appendMessage(message)
+    }
+    for (const [key, previous] of prior) {
+      if (incomingKeys.has(key) || previous.status === 'cancelled') continue
+      await this.appendMessagePatch({
+        ...previous,
+        status: 'cancelled',
+        updated_at: new Date().toISOString(),
+        error_category: 'removed-from-current-import-branch'
+      })
     }
     return existing ? 'changed' : 'imported'
   }
@@ -524,6 +620,14 @@ export class VaultRepository {
     return this.db.getEmbeddings(model)
   }
 
+  vaultCounts(): { projects: number; chats: number; messages: number; memories: number } {
+    return this.db.vaultCounts()
+  }
+
+  embeddingPayloadBytes(): number {
+    return this.db.embeddingPayloadBytes()
+  }
+
   async rebuildIndex(): Promise<RebuildStats> {
     await this.vault.assertConnected()
     await this.discoverProjects(true)
@@ -531,64 +635,270 @@ export class VaultRepository {
     return this.db.batch(() => this.populateIndex())
   }
 
-  private async populateIndex(): Promise<RebuildStats> {
-    this.db.clearContent()
-    const projects = await this.listProjects()
-    for (const project of projects) this.db.upsertProject(project)
+  async resetDerivedIntelligence(): Promise<{
+    preservedMemories: number
+    removedMemories: number
+    chats: number
+  }> {
+    await this.vault.assertConnected()
     const chats = await this.listChats()
-    let messageCount = 0
-    let memoryCount = 0
+    let preservedMemories = 0
+    let removedMemories = 0
     for (const chat of chats) {
-      this.db.upsertChat(chat)
-      const messages = await this.readMessages(chat.chat_id)
-      messageCount += messages.length
-      for (const message of messages) this.db.upsertMessage(message)
       const memories = await this.listMemories(chat.chat_id)
-      memoryCount += memories.length
-      for (const memory of memories) this.db.upsertMemory(memory)
-      const extractionPath = join(this.getChatDirectory(chat.chat_id), 'extractions.jsonl')
-      const extractionRuns = await readJsonLines(extractionPath, extractionRunSchema)
-      for (const run of extractionRuns.values) this.db.upsertExtractionRun(run)
-    }
-    for (const entry of await readdir(this.vault.path('evidence'), { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
-      const records = await readJsonLines(
-        this.vault.path('evidence', entry.name),
-        memoryEvidenceSchema
+      const preserved = memories.filter(
+        (memory) =>
+          memory.source_type === 'manual' ||
+          memory.user_confirmed ||
+          memory.confirmation_source === 'explicit_user_action'
       )
-      for (const record of records.values) this.db.upsertEvidence(record)
-    }
-    for (const entry of await readdir(this.vault.path('topics'), { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
-      const topicFileSchema = z.object({
-        schema_version: z.literal(1),
-        topics: z.array(topicSegmentSchema)
-      })
-      const file = await readValidatedJson(this.vault.path('topics', entry.name), topicFileSchema)
-      for (const topic of file.topics) this.db.upsertTopic(topic)
-    }
-    for (const entry of await readdir(this.vault.path('import-records'), { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
-      this.db.upsertImportRecord(
-        await readValidatedJson(this.vault.path('import-records', entry.name), importRecordSchema)
+      const removed = memories.filter(
+        (memory) => !preserved.some((item) => item.memory_id === memory.memory_id)
       )
+      preservedMemories += preserved.length
+      removedMemories += removed.length
+      await this.replaceChatMemories(chat.chat_id, preserved)
+      for (const memory of removed)
+        await rm(this.vault.path('evidence', `${memory.memory_id}.jsonl`), { force: true })
+      await this.replaceTopics(chat.chat_id, [])
+      await rm(this.vault.path('processing', `${chat.chat_id}.json`), { force: true })
+      await this.setChatProcessingState(chat.chat_id, 'unprocessed')
     }
-    for (const entry of await readdir(this.vault.path('provider-memories'), {
-      withFileTypes: true
-    })) {
-      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
-      this.db.upsertProviderMemory(
-        await readValidatedJson(
-          this.vault.path('provider-memories', entry.name),
-          providerMemorySchema
+    return { preservedMemories, removedMemories, chats: chats.length }
+  }
+
+  async migrateLegacyMemoryProvenance(): Promise<{
+    status: 'complete'
+    performed: boolean
+    migratedMemories: number
+    evidenceCreated: number
+    needsReview: number
+    backupDirectory: string
+  }> {
+    await this.vault.assertConnected()
+    await this.discoverChats(true)
+    const reportPath = this.vault.path('migrations', 'v0.1-memory-evidence-to-v0.2.1.json')
+    if (await pathExists(reportPath)) {
+      const previous = JSON.parse(await readFile(reportPath, 'utf8')) as {
+        status?: string
+        migratedMemories?: number
+        evidenceCreated?: number
+        needsReview?: number
+        backupDirectory?: string
+      }
+      if (previous.status === 'complete' && typeof previous.backupDirectory === 'string') {
+        return {
+          status: 'complete',
+          performed: false,
+          migratedMemories: previous.migratedMemories ?? 0,
+          evidenceCreated: previous.evidenceCreated ?? 0,
+          needsReview: previous.needsReview ?? 0,
+          backupDirectory: previous.backupDirectory
+        }
+      }
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const backupDirectory = this.vault.path('backups', `v0.1-memory-evidence-${stamp}`)
+    await ensureDirectory(backupDirectory)
+    await atomicWriteJson(reportPath, {
+      migration: 'v0.1-memory-evidence-to-v0.2.1',
+      status: 'started',
+      startedAt: new Date().toISOString(),
+      backupDirectory: basename(backupDirectory)
+    })
+
+    const messages = new Map<string, Message>()
+    const chats = new Map<string, Chat>()
+    for (const chat of await this.listChats()) {
+      chats.set(chat.chat_id, chat)
+      for (const message of await this.readMessages(chat.chat_id))
+        messages.set(message.message_id, message)
+    }
+    let migratedMemories = 0
+    let evidenceCreated = 0
+    let needsReview = 0
+    const issues: Array<{ memoryId: string; category: string }> = []
+    for (const [chatId, directory] of this.chatDirectories) {
+      const memoryPath = join(directory, 'memories.json')
+      if (!(await pathExists(memoryPath))) continue
+      const memoryFile = await readValidatedJson(memoryPath, memoryFileSchema)
+      const needsMigration = memoryFile.memories.some(
+        (memory) => !memory.scope || !memory.evidence_ids?.length || !memory.source_chat_ids?.length
+      )
+      if (!needsMigration) continue
+      await copyFile(memoryPath, join(backupDirectory, `${chatId}--memories.pre-v0.2.1.json`))
+      const updated: Memory[] = []
+      for (const original of memoryFile.memories) {
+        const sourceMessages = original.source_message_ids.flatMap((messageId) => {
+          const message = messages.get(messageId)
+          return message ? [message] : []
+        })
+        const unresolved = sourceMessages.length !== original.source_message_ids.length
+        const explicitScope =
+          original.scope ??
+          (original.project_id && chats.get(chatId)?.project_id === original.project_id
+            ? ({ kind: 'project', project_id: original.project_id } as const)
+            : ({ kind: 'conversation', chat_id: chatId } as const))
+        const existingEvidencePath = this.vault.path('evidence', `${original.memory_id}.jsonl`)
+        const existingEvidence = (await pathExists(existingEvidencePath))
+          ? (await readJsonLines(existingEvidencePath, memoryEvidenceSchema)).values
+          : []
+        if (existingEvidence.length > 0) {
+          await copyFile(
+            existingEvidencePath,
+            join(backupDirectory, `${original.memory_id}--evidence.pre-v0.2.1.jsonl`)
+          )
+        }
+        const evidenceById = new Map(
+          existingEvidence.map((evidence) => [evidence.evidence_id, evidence])
         )
-      )
+        for (const message of sourceMessages) {
+          const evidenceId = stableEvidenceId(original.memory_id, message.message_id)
+          if (evidenceById.has(evidenceId)) continue
+          evidenceById.set(
+            evidenceId,
+            memoryEvidenceSchema.parse({
+              evidence_id: evidenceId,
+              memory_id: original.memory_id,
+              chat_id: message.chat_id,
+              message_id: message.message_id,
+              provider: message.provider,
+              exact_excerpt: message.content.slice(0, 4000),
+              start_offset: message.content ? 0 : null,
+              end_offset: message.content ? Math.min(message.content.length, 4000) : null,
+              segment_id: null,
+              evidence_role: migrationEvidenceRole(original),
+              created_at: original.created_at,
+              source_available: true
+            })
+          )
+          evidenceCreated += 1
+        }
+        if (evidenceById.size > 0) {
+          await atomicWriteText(
+            existingEvidencePath,
+            `${[...evidenceById.values()].map((record) => JSON.stringify(record)).join('\n')}\n`
+          )
+        }
+        if (unresolved) {
+          needsReview += 1
+          issues.push({ memoryId: original.memory_id, category: 'source-message-missing' })
+        }
+        const preserveConfirmed =
+          original.user_confirmed &&
+          (original.state === 'confirmed' || original.state === 'completed')
+        updated.push(
+          memorySchema.parse({
+            ...original,
+            scope: explicitScope,
+            source_chat_ids: [
+              ...new Set(sourceMessages.map((message) => message.chat_id).concat(chatId))
+            ],
+            evidence_ids: [...evidenceById.keys()],
+            state: unresolved && !preserveConfirmed ? 'needs_review' : original.state,
+            confirmation_source:
+              original.confirmation_source && original.confirmation_source !== 'none'
+                ? original.confirmation_source
+                : original.user_confirmed
+                  ? 'explicit_user_action'
+                  : 'none',
+            tags: unresolved
+              ? [...new Set([...original.tags, 'migration-evidence-needs-review'])]
+              : original.tags
+          })
+        )
+        migratedMemories += 1
+      }
+      await atomicWriteJson(memoryPath, { schema_version: 1, memories: updated })
     }
+    const report = {
+      migration: 'v0.1-memory-evidence-to-v0.2.1',
+      status: 'complete' as const,
+      completedAt: new Date().toISOString(),
+      migratedMemories,
+      evidenceCreated,
+      needsReview,
+      backupDirectory: basename(backupDirectory),
+      issues
+    }
+    await atomicWriteJson(reportPath, report)
     return {
-      projects: projects.length,
-      chats: chats.length,
-      messages: messageCount,
-      memories: memoryCount
+      status: 'complete',
+      performed: true,
+      migratedMemories,
+      evidenceCreated,
+      needsReview,
+      backupDirectory: report.backupDirectory
+    }
+  }
+
+  private async populateIndex(): Promise<RebuildStats> {
+    this.db.beginContentRebuild()
+    try {
+      this.db.clearContent()
+      const projects = await this.listProjects()
+      for (const project of projects) this.db.upsertProject(project)
+      const chats = await this.listChats()
+      let messageCount = 0
+      let memoryCount = 0
+      for (const chat of chats) {
+        this.db.upsertChat(chat)
+        const messages = await this.readMessages(chat.chat_id)
+        messageCount += messages.length
+        for (const message of messages) this.db.upsertMessage(message)
+        const memories = await this.listMemories(chat.chat_id)
+        memoryCount += memories.length
+        for (const memory of memories) this.db.upsertMemory(memory)
+        const extractionPath = join(this.getChatDirectory(chat.chat_id), 'extractions.jsonl')
+        const extractionRuns = await readJsonLines(extractionPath, extractionRunSchema)
+        for (const run of extractionRuns.values) this.db.upsertExtractionRun(run)
+      }
+      for (const entry of await readdir(this.vault.path('evidence'), { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
+        const records = await readJsonLines(
+          this.vault.path('evidence', entry.name),
+          memoryEvidenceSchema
+        )
+        for (const record of records.values) this.db.upsertEvidence(record)
+      }
+      for (const entry of await readdir(this.vault.path('topics'), { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+        const topicFileSchema = z.object({
+          schema_version: z.literal(1),
+          topics: z.array(topicSegmentSchema)
+        })
+        const file = await readValidatedJson(this.vault.path('topics', entry.name), topicFileSchema)
+        for (const topic of file.topics) this.db.upsertTopic(topic)
+      }
+      for (const entry of await readdir(this.vault.path('import-records'), {
+        withFileTypes: true
+      })) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+        this.db.upsertImportRecord(
+          await readValidatedJson(this.vault.path('import-records', entry.name), importRecordSchema)
+        )
+      }
+      for (const entry of await readdir(this.vault.path('provider-memories'), {
+        withFileTypes: true
+      })) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+        this.db.upsertProviderMemory(
+          await readValidatedJson(
+            this.vault.path('provider-memories', entry.name),
+            providerMemorySchema
+          )
+        )
+      }
+      this.db.completeContentRebuild()
+      return {
+        projects: projects.length,
+        chats: chats.length,
+        messages: messageCount,
+        memories: memoryCount
+      }
+    } catch (error) {
+      this.db.cancelContentRebuild()
+      throw error
     }
   }
 
@@ -666,4 +976,21 @@ export class VaultRepository {
     if (!this.index) throw new Error('Vault repository has not been initialized.')
     return this.index
   }
+}
+
+function stableEvidenceId(memoryId: string, messageId: string): string {
+  return `evidence_${createHash('sha256')
+    .update(`${memoryId}:${messageId}`)
+    .digest('hex')
+    .slice(0, 32)}`
+}
+
+function migrationEvidenceRole(
+  memory: Memory
+): 'supports' | 'confirms' | 'contradicts' | 'supersedes' | 'completes' {
+  if (memory.state === 'completed' || memory.type === 'completed_item') return 'completes'
+  if (memory.type === 'correction' || memory.supersedes.length > 0) return 'supersedes'
+  if (memory.type === 'rejected_option' || memory.state === 'rejected') return 'contradicts'
+  if (memory.user_confirmed || memory.state === 'confirmed') return 'confirms'
+  return 'supports'
 }

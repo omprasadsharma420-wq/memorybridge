@@ -26,6 +26,7 @@ export interface ProviderHealth {
 }
 
 export interface ProviderCapabilities {
+  authentication: boolean
   chat: boolean
   streaming: boolean
   structuredOutput: boolean
@@ -34,6 +35,15 @@ export interface ProviderCapabilities {
   cancellation: boolean
 }
 
+export type ProviderCapability =
+  | 'authentication'
+  | 'chat'
+  | 'streaming'
+  | 'structuredOutput'
+  | 'embeddings'
+  | 'modelListing'
+  | 'cancellation'
+
 export interface AIProvider {
   readonly id: string
   capabilities(): ProviderCapabilities
@@ -41,5 +51,6 @@ export interface AIProvider {
   generateStructured<T>(request: StructuredGenerationRequest<T>): Promise<T>
   embed(texts: string[], model: string, signal?: AbortSignal): Promise<number[][]>
   validateConfiguration(): Promise<ProviderHealth>
+  testCapability(capability: ProviderCapability, signal?: AbortSignal): Promise<ProviderHealth>
   listModels(signal?: AbortSignal): Promise<string[]>
 }

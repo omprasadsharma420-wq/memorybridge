@@ -1,18 +1,24 @@
 # GitHub publishing
 
-The private repository is `omprasadsharma420-wq/memorybridge` with `origin` configured over HTTPS. Production-pivot work belongs on `codex/memorybridge-production-pivot`; do not push it directly to `main`.
+Repository: `omprasadsharma420-wq/memorybridge`.
+
+The 0.2.1 MVP-test work belongs on `codex/memorybridge-mvp-stabilization`, based on rebuilt `main`.
+PR #2 is already merged; do not reuse or merge it.
 
 ## Required release workflow
 
-1. Confirm the diff contains no real vaults, exports, credentials, paths, generated release artifacts, or unrelated changes.
-2. Run formatting, lint, types, unit/integration tests, build, UI test, audit, and Windows packaging.
-3. Commit in logical groups with evidence in commit messages or the PR body.
-4. Push the branch to `origin`.
-5. Open a draft PR against `main` describing migration, scope/security invariants, test evidence, and explicit non-claims.
-6. Wait for GitHub Actions; inspect logs and repair failures before marking ready.
+1. Confirm the diff contains no real vaults, exports, credentials, generated release binaries,
+   temporary logs, absolute user paths, or unrelated changes.
+2. Run formatting, lint, types, unit/integration tests, build, Electron UI test, full benchmark,
+   MCP smoke, zero-vulnerability audit, Windows packaging, packaged executable workflow, signature
+   check, and SHA-256 generation.
+3. Commit intentionally and push the current branch.
+4. Open a new review PR against `main` with migration/scope/security invariants, exact test counts,
+   performance measurements, installer link, and explicit limitations.
+5. Wait for the Windows GitHub Actions job and repair any failure.
+6. Publish `v0.2.1-mvp-test.1` as a pre-release for internal testing. Upload the unsigned x64
+   installer and `SHA256SUMS.txt`; recommend a new disposable vault.
+7. Keep the PR unmerged until independent human review.
 
-The workflow triggers on `main` and `codex/**`, uploads the unsigned NSIS installer, and must not receive secrets or real exports. Signed distribution remains a separate release decision.
-
-## Handoff link
-
-Use the draft pull request <https://github.com/omprasadsharma420-wq/memorybridge/pull/2> as the link to send to ChatGPT work. A local filesystem link is not portable to another ChatGPT task. Verify its hosted checks after every pushed commit before calling it ready.
+The CI workflow runs on `main`, `codex/**`, and pull requests. It must receive no signing keys, API
+keys, or real exports. Signed distribution remains a later release decision.

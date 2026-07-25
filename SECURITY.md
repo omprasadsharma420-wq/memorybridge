@@ -8,9 +8,12 @@ Report vulnerabilities privately through GitHub Security Advisories for this rep
 - Frozen narrow preload API and Zod validation for every IPC payload.
 - Windows secure credential storage; secrets are excluded from settings, logs, errors, diagnostics, repository fixtures, and MCP.
 - Path containment, safe filenames, manifest/vault identity, atomic writes, backup recovery, and bounded parsers.
-- App single-instance lock plus vault ID/PID/machine/version/timestamp heartbeat lock, stale recovery, and read-only conflict handling.
+- App single-instance lock plus serialized ownership-token vault heartbeat, foreign-lock protection,
+  stale recovery, shutdown-race coverage, and an honest non-browsable locked state.
 - Authoritative append-only transcript semantics; indexes are query-limited and rebuildable.
-- Import limits: 512 MB archive, 100 MB entry, 50,000 entries, bounded raw metadata, synthetic test fixtures.
+- Streaming import limits: 512 MB archive, 100 MB entry, 1 GB cumulative expansion, 50,000 entries,
+  maximum 250:1 compression ratio, traversal rejection, cancellation, bounded raw metadata, and
+  synthetic fixtures only.
 - Provider error redaction, timeouts, bounded retries, cancellation, strict structured parsing, SSE termination checks, and conservative capabilities.
 - Local MCP stdio, validated manifest, query-only SQLite, strict scope, result limits, citations, and no generic file, shell, write, credential, or SQL tool.
 - Dependency versions are locked; CI runs audit, lint, types, tests, build, UI test, and packaging.

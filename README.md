@@ -5,14 +5,15 @@ MemoryBridge is a Windows-first, local-first universal AI memory layer. It inges
 ## What ships
 
 - Native streaming chat with mock/offline mode and an OpenAI-compatible provider adapter.
-- Internal or external manifest-identified vaults, registered-vault reconnect, ownership lock/heartbeat, stale recovery, and read-only conflict handling.
+- Guided internal/external vault setup, capacity inventory, write verification, registered-vault reconnect by identity, automatic drive recovery, ownership heartbeat, stale recovery, and honest locked-instance handling.
 - Canonical provider/conversation/message metadata with authoritative JSONL transcripts and rebuildable SQLite/FTS5 indexes.
-- ChatGPT ZIP and generic JSON/JSONL/Markdown/text import, preview, dedupe, changed-only re-import, watched inbox, branches, and provider-memory review.
+- Streaming, bounded ChatGPT ZIP and generic JSON/JSONL/Markdown/text import, coherent active-branch reconstruction, preview, progress/cancel, integrity validation, dedupe, changed-only re-import, watched inbox, and provider-memory review.
 - Deterministic topic segmentation, conservative project classification, and resumable segment/chat/project/vault reprocessing with checkpoints, retry, cancellation, and progress.
 - Evidence-backed memory with global/project/conversation scope, lifecycle, corrections, constraints, deadlines, people, organizations, artifacts, conflicts, temporal metadata, and embedding invalidation.
 - Unicode hybrid retrieval with complete-message eligibility, project isolation, context budgets, filters, and exact citations.
 - Local stdio MCP server with ten bounded retrieval tools and no filesystem-browsing surface.
 - Providers, projects, topics, memory and provider-memory review, imports/sync, source-filtered search, MCP, and vault-management UI.
+- A deterministic synthetic demo, non-technical first-run onboarding, diagnostic copy with no content/secrets/paths, and packaged restart/disconnect/reconnect coverage.
 
 MemoryBridge does not scrape provider websites or use undocumented consumer APIs. Capability labels are explicit; live provider sync is not claimed.
 
@@ -36,6 +37,7 @@ npm run typecheck
 npm test
 npm run build
 npm run test:ui
+npm run benchmark:large
 npm audit --audit-level=high
 npm run package:win
 ```
@@ -46,7 +48,10 @@ The unsigned NSIS installer is written to `release/`. CI runs the same core chec
 
 Use **Imports & sync** to preview and import a supported file, or place it in the vault's `import-inbox` and scan. Partial imports retain per-conversation checkpoints. Provider-memory records remain separate until the user confirms, edits, rejects, deletes, or supersedes them.
 
-Use **MCP & integrations** to copy the local stdio configuration. See [ingestion](docs/INGESTION_PIPELINE.md), [connectors](docs/CONNECTOR_ARCHITECTURE.md), and [MCP](docs/MCP.md).
+Use **MCP & integrations** to copy the local stdio configuration. After a production build, verify
+the local transport with `npm run mcp:smoke -- --self-test`, or pass a real vault path instead of
+`--self-test`. See [ingestion](docs/INGESTION_PIPELINE.md),
+[connectors](docs/CONNECTOR_ARCHITECTURE.md), and [MCP](docs/MCP.md).
 
 ## Documentation
 
@@ -58,3 +63,5 @@ Use **MCP & integrations** to copy the local stdio configuration. See [ingestion
 - [Repository audit](docs/REPOSITORY_AUDIT.md) and [production pivot plan](docs/PRODUCTION_PIVOT_PLAN.md)
 - [Status](docs/STATUS.md) and [ChatGPT handoff](docs/CHATGPT_HANDOFF.md)
 - [Requirements verification matrix](docs/REQUIREMENTS_MATRIX.md)
+- [Non-technical user test guide](docs/USER_TEST_GUIDE.md)
+- [Measured performance](docs/PERFORMANCE_RESULTS.md), [release notes](docs/RELEASE_NOTES_0.2.1.md), and [known limitations](docs/KNOWN_LIMITATIONS.md)

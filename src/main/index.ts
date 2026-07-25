@@ -6,6 +6,7 @@ import { registerIpc, unregisterIpc } from './ipc'
 let mainWindow: BrowserWindow | null = null
 let service: AppService | null = null
 let vaultPoller: NodeJS.Timeout | null = null
+let shutdownComplete = false
 const ownsApplicationLock = app.requestSingleInstanceLock()
 
 function createWindow(): BrowserWindow {
@@ -83,8 +84,13 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (shutdownComplete) return
+  event.preventDefault()
   if (vaultPoller) clearInterval(vaultPoller)
   unregisterIpc()
-  service?.close()
+  void (service?.close() ?? Promise.resolve()).finally(() => {
+    shutdownComplete = true
+    app.quit()
+  })
 })

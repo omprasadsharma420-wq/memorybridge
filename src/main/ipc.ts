@@ -12,10 +12,13 @@ import {
   sendMessageInputSchema,
   settingsInputSchema,
   importTokenInputSchema,
+  importOnlyInputSchema,
   processingCancelInputSchema,
+  providerCapabilityInputSchema,
   projectOnlyInputSchema,
   providerMemoryActionInputSchema,
   topicOnlyInputSchema,
+  storageStatsInputSchema,
   updateChatInputSchema,
   updateProjectInputSchema
 } from '../shared/contracts'
@@ -89,7 +92,17 @@ export function registerIpc(service: AppService): void {
   })
   ipcMain.handle('credentials:clear', () => service.clearApiKey())
   ipcMain.handle('provider:test', () => service.testConnection())
+  ipcMain.handle('provider:test-capability', (_event, input: unknown) => {
+    const { capability } = providerCapabilityInputSchema.parse(input)
+    return service.testProviderCapability(capability)
+  })
   ipcMain.handle('index:rebuild', () => service.rebuildIndex())
+  ipcMain.handle('storage:stats', (_event, input: unknown) => {
+    const { refresh } = storageStatsInputSchema.parse(input ?? {})
+    return service.getVaultStorage(refresh)
+  })
+  ipcMain.handle('storage:cancel', () => service.cancelVaultStorage())
+  ipcMain.handle('storage:verify', () => service.verifyVaultLocation())
   ipcMain.handle('extraction:rerun', (_event, input: unknown) => {
     const { chatId } = chatOnlyInputSchema.parse(input)
     return service.rerunExtraction(chatId)
@@ -107,6 +120,7 @@ export function registerIpc(service: AppService): void {
     return service.reprocessProject(projectId)
   })
   ipcMain.handle('processing:vault', () => service.reprocessVault())
+  ipcMain.handle('processing:rebuild-vault', () => service.rebuildVaultIntelligence())
   ipcMain.handle('processing:cancel', (_event, input: unknown) => {
     const { scopeId } = processingCancelInputSchema.parse(input)
     service.cancelReprocessing(scopeId)
@@ -117,7 +131,17 @@ export function registerIpc(service: AppService): void {
     const { token } = importTokenInputSchema.parse(input)
     return service.executeImport(token)
   })
+  ipcMain.handle('import:cancel', (_event, input: unknown) => {
+    const { token } = importTokenInputSchema.parse(input)
+    service.cancelImport(token)
+  })
   ipcMain.handle('import:scan-inbox', () => service.scanImportInbox())
+  ipcMain.handle('import:list', () => service.listImportRecords())
+  ipcMain.handle('import:validate', (_event, input: unknown) => {
+    const { importId } = importOnlyInputSchema.parse(input)
+    return service.validateImport(importId)
+  })
+  ipcMain.handle('import:demo', () => service.loadDemoArchive())
   ipcMain.handle('topic:list', (_event, input: unknown) => {
     const { chatId } = chatOnlyInputSchema.partial().parse(input ?? {})
     return service.listTopics(chatId)
@@ -132,6 +156,7 @@ export function registerIpc(service: AppService): void {
   )
   ipcMain.handle('mcp:configuration', () => service.getMcpConfiguration())
   ipcMain.handle('diagnostics:export', () => service.exportDiagnostics())
+  ipcMain.handle('diagnostics:report', () => service.getDiagnosticReport())
 }
 
 export function unregisterIpc(): void {
@@ -156,23 +181,33 @@ export function unregisterIpc(): void {
     'credentials:save',
     'credentials:clear',
     'provider:test',
+    'provider:test-capability',
     'index:rebuild',
+    'storage:stats',
+    'storage:cancel',
+    'storage:verify',
     'extraction:rerun',
     'processing:chat',
     'processing:segment',
     'processing:project',
     'processing:vault',
+    'processing:rebuild-vault',
     'processing:cancel',
     'connector:list',
     'import:choose',
     'import:execute',
+    'import:cancel',
     'import:scan-inbox',
+    'import:list',
+    'import:validate',
+    'import:demo',
     'topic:list',
     'evidence:list',
     'provider-memory:list',
     'provider-memory:action',
     'mcp:configuration',
-    'diagnostics:export'
+    'diagnostics:export',
+    'diagnostics:report'
   ]
   channels.forEach((channel) => ipcMain.removeHandler(channel))
 }

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, 'codex/**']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,12 +28,23 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:unit
       - run: npm run test:integration
+      - run: npm run benchmark:large
       - run: npm run build
       - run: npm run test:ui
       - run: npm run package:win
+      - name: Create installer checksum
+        shell: pwsh
+        run: |
+          Get-ChildItem -LiteralPath release -Filter *.exe |
+            ForEach-Object {
+              "$(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 | Select-Object -ExpandProperty Hash)  $($_.Name)"
+            } |
+            Set-Content -LiteralPath release/SHA256SUMS.txt -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
           name: memorybridge-windows
-          path: release/*.exe
+          path: |
+            release/*.exe
+            release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 7

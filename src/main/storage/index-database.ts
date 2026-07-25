@@ -18,11 +18,13 @@ import { excerpt } from '../../shared/text'
 import { ensureDirectory } from './file-utils'
 import { filterMemoriesForScope } from '../memory/scope'
 
-const SCHEMA_VERSION = 7
+const SCHEMA_VERSION = 8
 
 export class IndexDatabase {
   private database: DatabaseSync | null = null
   private contentRebuildRequired = false
+  private deferSearchIndexWrites = false
+  private readonly statementCache = new Map<string, ReturnType<DatabaseSync['prepare']>>()
 
   constructor(private readonly path: string) {}
 
@@ -37,6 +39,7 @@ export class IndexDatabase {
   }
 
   close(): void {
+    this.statementCache.clear()
     this.database?.close()
     this.database = null
   }
@@ -96,28 +99,55 @@ export class IndexDatabase {
     })
   }
 
+  beginContentRebuild(): void {
+    this.deferSearchIndexWrites = true
+  }
+
+  completeContentRebuild(): void {
+    this.db.exec(`
+      DELETE FROM messages_fts;
+      DELETE FROM memories_fts;
+      DELETE FROM chats_fts;
+      DELETE FROM provider_memories_fts;
+      INSERT INTO chats_fts (chat_id, title, project_id)
+        SELECT chat_id, title, COALESCE(project_id, '') FROM chats;
+      INSERT INTO messages_fts (message_id, content, chat_id, project_id)
+        SELECT m.message_id, m.content, m.chat_id, COALESCE(c.project_id, '')
+        FROM messages m JOIN chats c ON c.chat_id = m.chat_id;
+      INSERT INTO memories_fts (memory_id, statement, type, state, project_id, chat_id)
+        SELECT memory_id, statement, type, state, COALESCE(project_id, ''), chat_id
+        FROM memories;
+      INSERT INTO provider_memories_fts
+        (provider_memory_id, statement, provider, source_type, state)
+        SELECT provider_memory_id, statement, provider, source_type, state
+        FROM provider_memories;
+    `)
+    this.deferSearchIndexWrites = false
+  }
+
+  cancelContentRebuild(): void {
+    this.deferSearchIndexWrites = false
+  }
+
   upsertProject(project: Project): void {
-    this.db
-      .prepare(
-        `INSERT INTO projects (project_id, name, description, created_at, updated_at)
+    this.prepared(
+      `INSERT INTO projects (project_id, name, description, created_at, updated_at)
          VALUES (@project_id, @name, @description, @created_at, @updated_at)
          ON CONFLICT(project_id) DO UPDATE SET
            name=excluded.name, description=excluded.description, updated_at=excluded.updated_at`
-      )
-      .run({
-        project_id: project.project_id,
-        name: project.name,
-        description: project.description,
-        created_at: project.created_at,
-        updated_at: project.updated_at
-      })
+    ).run({
+      project_id: project.project_id,
+      name: project.name,
+      description: project.description,
+      created_at: project.created_at,
+      updated_at: project.updated_at
+    })
   }
 
   upsertChat(chat: Chat): void {
     this.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO chats (chat_id, project_id, title, created_at, updated_at,
+      this.prepared(
+        `INSERT INTO chats (chat_id, project_id, title, created_at, updated_at,
              source_provider, source_conversation_id, original_title, workspace, model_ids,
              branch_count, attachment_count, citation_count, sync_state, processing_state,
              import_origin, content_hash, raw_metadata)
@@ -135,39 +165,41 @@ export class IndexDatabase {
              sync_state=excluded.sync_state, processing_state=excluded.processing_state,
              import_origin=excluded.import_origin, content_hash=excluded.content_hash,
              raw_metadata=excluded.raw_metadata`
+      ).run({
+        chat_id: chat.chat_id,
+        project_id: chat.project_id,
+        title: chat.title,
+        created_at: chat.created_at,
+        updated_at: chat.updated_at,
+        source_provider: chat.source_provider,
+        source_conversation_id: chat.source_conversation_id,
+        original_title: chat.original_title,
+        workspace: chat.workspace,
+        model_ids: JSON.stringify(chat.model_ids),
+        branch_count: chat.branch_count,
+        attachment_count: chat.attachment_count,
+        citation_count: chat.citation_count,
+        sync_state: chat.sync_state,
+        processing_state: chat.processing_state,
+        import_origin: chat.import_origin,
+        content_hash: chat.content_hash,
+        raw_metadata: JSON.stringify(chat.raw_metadata)
+      })
+      if (!this.deferSearchIndexWrites) {
+        this.prepared('DELETE FROM chats_fts WHERE chat_id = ?').run(chat.chat_id)
+        this.prepared('INSERT INTO chats_fts (chat_id, title, project_id) VALUES (?, ?, ?)').run(
+          chat.chat_id,
+          chat.title,
+          chat.project_id ?? ''
         )
-        .run({
-          chat_id: chat.chat_id,
-          project_id: chat.project_id,
-          title: chat.title,
-          created_at: chat.created_at,
-          updated_at: chat.updated_at,
-          source_provider: chat.source_provider,
-          source_conversation_id: chat.source_conversation_id,
-          original_title: chat.original_title,
-          workspace: chat.workspace,
-          model_ids: JSON.stringify(chat.model_ids),
-          branch_count: chat.branch_count,
-          attachment_count: chat.attachment_count,
-          citation_count: chat.citation_count,
-          sync_state: chat.sync_state,
-          processing_state: chat.processing_state,
-          import_origin: chat.import_origin,
-          content_hash: chat.content_hash,
-          raw_metadata: JSON.stringify(chat.raw_metadata)
-        })
-      this.db.prepare('DELETE FROM chats_fts WHERE chat_id = ?').run(chat.chat_id)
-      this.db
-        .prepare('INSERT INTO chats_fts (chat_id, title, project_id) VALUES (?, ?, ?)')
-        .run(chat.chat_id, chat.title, chat.project_id ?? '')
+      }
     })
   }
 
   upsertMessage(message: Message): void {
     this.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO messages
+      this.prepared(
+        `INSERT INTO messages
              (message_id, chat_id, role, content, created_at, updated_at, provider, model, status,
               sequence, error_category, retrieved_memory_ids, retrieved_context_ids,
               provider_message_id, parent_message_id, branch_id, content_blocks, attachments,
@@ -187,46 +219,44 @@ export class IndexDatabase {
              attachments=excluded.attachments, tool_events=excluded.tool_events,
              citations=excluded.citations, raw_metadata=excluded.raw_metadata,
              content_hash=excluded.content_hash`
-        )
-        .run({
-          message_id: message.message_id,
-          chat_id: message.chat_id,
-          role: message.role,
-          content: message.content,
-          created_at: message.created_at,
-          updated_at: message.updated_at,
-          provider: message.provider,
-          model: message.model,
-          status: message.status,
-          sequence: message.sequence,
-          error_category: message.error_category ?? null,
-          retrieved_memory_ids: JSON.stringify(message.retrieved_memory_ids),
-          retrieved_context_ids: JSON.stringify(message.retrieved_context_ids),
-          provider_message_id: message.provider_message_id ?? null,
-          parent_message_id: message.parent_message_id ?? null,
-          branch_id: message.branch_id ?? null,
-          content_blocks: JSON.stringify(message.content_blocks ?? []),
-          attachments: JSON.stringify(message.attachments ?? []),
-          tool_events: JSON.stringify(message.tool_events ?? []),
-          citations: JSON.stringify(message.citations ?? []),
-          raw_metadata: JSON.stringify(message.raw_metadata ?? {}),
-          content_hash: message.content_hash ?? null
-        })
-      this.db.prepare('DELETE FROM messages_fts WHERE message_id = ?').run(message.message_id)
-      this.db
-        .prepare(
+      ).run({
+        message_id: message.message_id,
+        chat_id: message.chat_id,
+        role: message.role,
+        content: message.content,
+        created_at: message.created_at,
+        updated_at: message.updated_at,
+        provider: message.provider,
+        model: message.model,
+        status: message.status,
+        sequence: message.sequence,
+        error_category: message.error_category ?? null,
+        retrieved_memory_ids: JSON.stringify(message.retrieved_memory_ids),
+        retrieved_context_ids: JSON.stringify(message.retrieved_context_ids),
+        provider_message_id: message.provider_message_id ?? null,
+        parent_message_id: message.parent_message_id ?? null,
+        branch_id: message.branch_id ?? null,
+        content_blocks: JSON.stringify(message.content_blocks ?? []),
+        attachments: JSON.stringify(message.attachments ?? []),
+        tool_events: JSON.stringify(message.tool_events ?? []),
+        citations: JSON.stringify(message.citations ?? []),
+        raw_metadata: JSON.stringify(message.raw_metadata ?? {}),
+        content_hash: message.content_hash ?? null
+      })
+      if (!this.deferSearchIndexWrites) {
+        this.prepared('DELETE FROM messages_fts WHERE message_id = ?').run(message.message_id)
+        this.prepared(
           `INSERT INTO messages_fts (message_id, content, chat_id, project_id)
            SELECT ?, ?, c.chat_id, COALESCE(c.project_id, '') FROM chats c WHERE c.chat_id = ?`
-        )
-        .run(message.message_id, message.content, message.chat_id)
+        ).run(message.message_id, message.content, message.chat_id)
+      }
     })
   }
 
   upsertMemory(memory: Memory): void {
     this.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO memories
+      this.prepared(
+        `INSERT INTO memories
              (memory_id, type, statement, project_id, chat_id, source_message_ids, state, confidence,
               created_at, updated_at, effective_at, supersedes, superseded_by, entities, tags,
               user_confirmed, pinned, scope_kind, scope_id, confirmation_source, evidence_ids,
@@ -251,51 +281,49 @@ export class IndexDatabase {
              embedding_state=excluded.embedding_state,
              embedding_content_hash=excluded.embedding_content_hash,
              source_provider=excluded.source_provider, source_type=excluded.source_type`
-        )
-        .run({
-          memory_id: memory.memory_id,
-          type: memory.type,
-          statement: memory.statement,
-          project_id: memory.project_id,
-          chat_id: memory.chat_id,
-          state: memory.state,
-          confidence: memory.confidence,
-          created_at: memory.created_at,
-          updated_at: memory.updated_at,
-          effective_at: memory.effective_at,
-          superseded_by: memory.superseded_by,
-          source_message_ids: JSON.stringify(memory.source_message_ids),
-          supersedes: JSON.stringify(memory.supersedes),
-          entities: JSON.stringify(memory.entities),
-          tags: JSON.stringify(memory.tags),
-          user_confirmed: memory.user_confirmed ? 1 : 0,
-          pinned: memory.pinned ? 1 : 0,
-          scope_kind: memory.scope?.kind ?? (memory.project_id ? 'project' : 'conversation'),
-          scope_id:
-            memory.scope?.kind === 'project'
-              ? memory.scope.project_id
-              : memory.scope?.kind === 'conversation'
-                ? memory.scope.chat_id
-                : memory.scope?.kind === 'global'
-                  ? null
-                  : (memory.project_id ?? memory.chat_id),
-          confirmation_source: memory.confirmation_source ?? 'none',
-          evidence_ids: JSON.stringify(memory.evidence_ids ?? []),
-          source_chat_ids: JSON.stringify(memory.source_chat_ids ?? [memory.chat_id]),
-          valid_from: memory.valid_from ?? null,
-          valid_until: memory.valid_until ?? null,
-          temporal_precision: memory.temporal_precision ?? 'unknown',
-          embedding_state: memory.embedding_state ?? 'missing',
-          embedding_content_hash: memory.embedding_content_hash ?? null,
-          source_provider: memory.source_provider ?? 'native',
-          source_type: memory.source_type ?? 'auto_extracted'
-        })
-      this.db.prepare('DELETE FROM memories_fts WHERE memory_id = ?').run(memory.memory_id)
-      this.db
-        .prepare(
+      ).run({
+        memory_id: memory.memory_id,
+        type: memory.type,
+        statement: memory.statement,
+        project_id: memory.project_id,
+        chat_id: memory.chat_id,
+        state: memory.state,
+        confidence: memory.confidence,
+        created_at: memory.created_at,
+        updated_at: memory.updated_at,
+        effective_at: memory.effective_at,
+        superseded_by: memory.superseded_by,
+        source_message_ids: JSON.stringify(memory.source_message_ids),
+        supersedes: JSON.stringify(memory.supersedes),
+        entities: JSON.stringify(memory.entities),
+        tags: JSON.stringify(memory.tags),
+        user_confirmed: memory.user_confirmed ? 1 : 0,
+        pinned: memory.pinned ? 1 : 0,
+        scope_kind: memory.scope?.kind ?? (memory.project_id ? 'project' : 'conversation'),
+        scope_id:
+          memory.scope?.kind === 'project'
+            ? memory.scope.project_id
+            : memory.scope?.kind === 'conversation'
+              ? memory.scope.chat_id
+              : memory.scope?.kind === 'global'
+                ? null
+                : (memory.project_id ?? memory.chat_id),
+        confirmation_source: memory.confirmation_source ?? 'none',
+        evidence_ids: JSON.stringify(memory.evidence_ids ?? []),
+        source_chat_ids: JSON.stringify(memory.source_chat_ids ?? [memory.chat_id]),
+        valid_from: memory.valid_from ?? null,
+        valid_until: memory.valid_until ?? null,
+        temporal_precision: memory.temporal_precision ?? 'unknown',
+        embedding_state: memory.embedding_state ?? 'missing',
+        embedding_content_hash: memory.embedding_content_hash ?? null,
+        source_provider: memory.source_provider ?? 'native',
+        source_type: memory.source_type ?? 'auto_extracted'
+      })
+      if (!this.deferSearchIndexWrites) {
+        this.prepared('DELETE FROM memories_fts WHERE memory_id = ?').run(memory.memory_id)
+        this.prepared(
           'INSERT INTO memories_fts (memory_id, statement, type, state, project_id, chat_id) VALUES (?, ?, ?, ?, ?, ?)'
-        )
-        .run(
+        ).run(
           memory.memory_id,
           memory.statement,
           memory.type,
@@ -303,56 +331,51 @@ export class IndexDatabase {
           memory.project_id ?? '',
           memory.chat_id
         )
-      this.db
-        .prepare('DELETE FROM memory_relationships WHERE source_memory_id = ?')
-        .run(memory.memory_id)
-      for (const target of memory.supersedes) {
-        this.db
-          .prepare(
-            'INSERT OR REPLACE INTO memory_relationships (source_memory_id, target_memory_id, relationship) VALUES (?, ?, ?)'
-          )
-          .run(memory.memory_id, target, 'supersedes')
       }
-      this.db.prepare('DELETE FROM memory_entities WHERE memory_id = ?').run(memory.memory_id)
-      this.db.prepare('DELETE FROM entity_relationships WHERE memory_id = ?').run(memory.memory_id)
+      this.prepared('DELETE FROM memory_relationships WHERE source_memory_id = ?').run(
+        memory.memory_id
+      )
+      for (const target of memory.supersedes) {
+        this.prepared(
+          'INSERT OR REPLACE INTO memory_relationships (source_memory_id, target_memory_id, relationship) VALUES (?, ?, ?)'
+        ).run(memory.memory_id, target, 'supersedes')
+      }
+      this.prepared('DELETE FROM memory_entities WHERE memory_id = ?').run(memory.memory_id)
+      this.prepared('DELETE FROM entity_relationships WHERE memory_id = ?').run(memory.memory_id)
       for (const entity of memory.entities) {
-        this.db
-          .prepare('INSERT OR REPLACE INTO memory_entities (memory_id, entity) VALUES (?, ?)')
-          .run(memory.memory_id, entity)
+        this.prepared(
+          'INSERT OR REPLACE INTO memory_entities (memory_id, entity) VALUES (?, ?)'
+        ).run(memory.memory_id, entity)
       }
       for (let left = 0; left < memory.entities.length; left += 1) {
         for (let right = left + 1; right < memory.entities.length; right += 1) {
-          this.db
-            .prepare(
-              `INSERT OR REPLACE INTO entity_relationships
+          this.prepared(
+            `INSERT OR REPLACE INTO entity_relationships
                (source_entity, target_entity, relationship, memory_id, scope_kind, scope_id, updated_at)
                VALUES (?, ?, 'co_occurs', ?, ?, ?, ?)`
-            )
-            .run(
-              memory.entities[left]!,
-              memory.entities[right]!,
-              memory.memory_id,
-              memory.scope?.kind ?? (memory.project_id ? 'project' : 'conversation'),
-              memory.scope?.kind === 'project'
-                ? memory.scope.project_id
-                : memory.scope?.kind === 'conversation'
-                  ? memory.scope.chat_id
-                  : null,
-              memory.updated_at
-            )
+          ).run(
+            memory.entities[left]!,
+            memory.entities[right]!,
+            memory.memory_id,
+            memory.scope?.kind ?? (memory.project_id ? 'project' : 'conversation'),
+            memory.scope?.kind === 'project'
+              ? memory.scope.project_id
+              : memory.scope?.kind === 'conversation'
+                ? memory.scope.chat_id
+                : null,
+            memory.updated_at
+          )
         }
       }
-      this.db
-        .prepare(
-          `INSERT OR REPLACE INTO temporal_index (memory_id, valid_from, valid_until, precision)
+      this.prepared(
+        `INSERT OR REPLACE INTO temporal_index (memory_id, valid_from, valid_until, precision)
            VALUES (?, ?, ?, ?)`
-        )
-        .run(
-          memory.memory_id,
-          memory.valid_from ?? null,
-          memory.valid_until ?? null,
-          memory.temporal_precision ?? 'unknown'
-        )
+      ).run(
+        memory.memory_id,
+        memory.valid_from ?? null,
+        memory.valid_until ?? null,
+        memory.temporal_precision ?? 'unknown'
+      )
     })
   }
 
@@ -371,6 +394,7 @@ export class IndexDatabase {
           )
           .run(row.memory_id, row.memory_id)
         this.db.prepare('DELETE FROM embeddings WHERE memory_id = ?').run(row.memory_id)
+        this.db.prepare('DELETE FROM memory_evidence WHERE memory_id = ?').run(row.memory_id)
         this.db.prepare('DELETE FROM temporal_index WHERE memory_id = ?').run(row.memory_id)
         this.db.prepare('DELETE FROM memory_entities WHERE memory_id = ?').run(row.memory_id)
         this.db.prepare('DELETE FROM entity_relationships WHERE memory_id = ?').run(row.memory_id)
@@ -527,13 +551,23 @@ export class IndexDatabase {
       changed_count: record.changed_count,
       skipped_count: record.skipped_count,
       error_count: record.error_count,
-      review_count: record.review_count
+      review_count: record.review_count,
+      discovered_count: record.discovered_count,
+      branches_handled: record.branches_handled,
+      malformed_count: record.malformed_count,
+      skipped_entry_count: record.skipped_entry_count
+    }
+    const metadata = {
+      connector_version: record.connector_version,
+      validation_status: record.validation_status,
+      validation_issues: record.validation_issues
     }
     this.db
       .prepare(
         `INSERT OR REPLACE INTO import_records
        (import_id, connector_id, source_path, archive_hash, status, started_at, completed_at,
-        counters, checkpoint, error_category, error_messages) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        counters, checkpoint, error_category, error_messages, metadata)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.import_id,
@@ -546,7 +580,8 @@ export class IndexDatabase {
         JSON.stringify(counters),
         JSON.stringify(record.checkpoint),
         record.error_category,
-        JSON.stringify(record.error_messages)
+        JSON.stringify(record.error_messages),
+        JSON.stringify(metadata)
       )
   }
 
@@ -558,9 +593,11 @@ export class IndexDatabase {
       .get(hash) as Record<string, unknown> | undefined
     if (!row) return null
     const counters = JSON.parse(String(row.counters)) as Record<string, number>
+    const metadata = parseJsonRecord(row.metadata)
     return {
       import_id: String(row.import_id),
       connector_id: String(row.connector_id),
+      connector_version: String(metadata.connector_version ?? 'unknown'),
       source_path: String(row.source_path),
       archive_hash: String(row.archive_hash),
       status: String(row.status) as ImportRecord['status'],
@@ -573,6 +610,16 @@ export class IndexDatabase {
       skipped_count: counters.skipped_count ?? 0,
       error_count: counters.error_count ?? 0,
       review_count: counters.review_count ?? 0,
+      discovered_count: counters.discovered_count ?? 0,
+      branches_handled: counters.branches_handled ?? 0,
+      malformed_count: counters.malformed_count ?? 0,
+      skipped_entry_count: counters.skipped_entry_count ?? 0,
+      validation_status: String(
+        metadata.validation_status ?? 'not_run'
+      ) as ImportRecord['validation_status'],
+      validation_issues: Array.isArray(metadata.validation_issues)
+        ? metadata.validation_issues.filter((value): value is string => typeof value === 'string')
+        : [],
       checkpoint: JSON.parse(String(row.checkpoint)) as Record<string, unknown>,
       error_category: row.error_category ? String(row.error_category) : null,
       error_messages: parseStringArray(row.error_messages)
@@ -585,47 +632,47 @@ export class IndexDatabase {
         ? memory.scope.project_id
         : memory.scope.kind === 'conversation'
           ? memory.scope.chat_id
-          : null
-    this.db
-      .prepare(
-        `INSERT OR REPLACE INTO provider_memories
+          : memory.scope.kind === 'provider'
+            ? memory.scope.reference
+            : null
+    this.prepared(
+      `INSERT OR REPLACE INTO provider_memories
        (provider_memory_id, provider, provider_record_id, statement, source_label,
         source_type, scope_kind, scope_id, state, user_confirmed, imported_at,
         provider_updated_at, raw_source_reference, superseded_by, content_hash)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      memory.provider_memory_id,
+      memory.provider,
+      memory.provider_record_id,
+      memory.statement,
+      memory.source_label,
+      memory.source_type,
+      memory.scope.kind,
+      scopeId,
+      memory.state,
+      memory.user_confirmed ? 1 : 0,
+      memory.imported_at,
+      memory.provider_updated_at,
+      memory.raw_source_reference,
+      memory.superseded_by,
+      memory.content_hash
+    )
+    if (!this.deferSearchIndexWrites) {
+      this.prepared('DELETE FROM provider_memories_fts WHERE provider_memory_id = ?').run(
+        memory.provider_memory_id
       )
-      .run(
-        memory.provider_memory_id,
-        memory.provider,
-        memory.provider_record_id,
-        memory.statement,
-        memory.source_label,
-        memory.source_type,
-        memory.scope.kind,
-        scopeId,
-        memory.state,
-        memory.user_confirmed ? 1 : 0,
-        memory.imported_at,
-        memory.provider_updated_at,
-        memory.raw_source_reference,
-        memory.superseded_by,
-        memory.content_hash
-      )
-    this.db
-      .prepare('DELETE FROM provider_memories_fts WHERE provider_memory_id = ?')
-      .run(memory.provider_memory_id)
-    this.db
-      .prepare(
+      this.prepared(
         `INSERT INTO provider_memories_fts
          (provider_memory_id, statement, provider, source_type, state) VALUES (?, ?, ?, ?, ?)`
-      )
-      .run(
+      ).run(
         memory.provider_memory_id,
         memory.statement,
         memory.provider,
         memory.source_type,
         memory.state
       )
+    }
   }
 
   listProviderMemories(): ProviderMemory[] {
@@ -647,7 +694,13 @@ export class IndexDatabase {
           ? { kind: 'global' }
           : String(row.scope_kind) === 'project'
             ? { kind: 'project', project_id: String(row.scope_id) }
-            : { kind: 'conversation', chat_id: String(row.scope_id) },
+            : String(row.scope_kind) === 'conversation'
+              ? { kind: 'conversation', chat_id: String(row.scope_id) }
+              : {
+                  kind: 'provider',
+                  level: providerLevelFromSourceType(String(row.source_type)),
+                  reference: row.scope_id ? String(row.scope_id) : null
+                },
       state: String(row.state) as ProviderMemory['state'],
       user_confirmed: Boolean(row.user_confirmed),
       imported_at: String(row.imported_at),
@@ -714,6 +767,38 @@ export class IndexDatabase {
       Record<string, unknown>
     >
     return rows.map(rowToMessage)
+  }
+
+  countMessages(chatId: string): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS count FROM messages WHERE chat_id = ?')
+      .get(chatId) as { count: number }
+    return Number(row.count)
+  }
+
+  vaultCounts(): { projects: number; chats: number; messages: number; memories: number } {
+    const row = this.db
+      .prepare(
+        `SELECT
+          (SELECT COUNT(*) FROM projects) AS projects,
+          (SELECT COUNT(*) FROM chats) AS chats,
+          (SELECT COUNT(*) FROM messages) AS messages,
+          (SELECT COUNT(*) FROM memories) AS memories`
+      )
+      .get() as { projects: number; chats: number; messages: number; memories: number }
+    return {
+      projects: Number(row.projects),
+      chats: Number(row.chats),
+      messages: Number(row.messages),
+      memories: Number(row.memories)
+    }
+  }
+
+  embeddingPayloadBytes(): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(SUM(length(vector)), 0) AS bytes FROM embeddings')
+      .get() as { bytes: number }
+    return Number(row.bytes)
   }
 
   search(input: SearchInput): SearchResult[] {
@@ -940,6 +1025,14 @@ export class IndexDatabase {
     return this.database
   }
 
+  private prepared(sql: string): ReturnType<DatabaseSync['prepare']> {
+    const existing = this.statementCache.get(sql)
+    if (existing) return existing
+    const statement = this.db.prepare(sql)
+    this.statementCache.set(sql, statement)
+    return statement
+  }
+
   private transaction(action: () => void): void {
     if (this.db.isTransaction) {
       action()
@@ -1031,7 +1124,7 @@ export class IndexDatabase {
         import_id TEXT PRIMARY KEY, connector_id TEXT NOT NULL, source_path TEXT NOT NULL,
         archive_hash TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,
         completed_at TEXT, counters TEXT NOT NULL, checkpoint TEXT NOT NULL, error_category TEXT,
-        error_messages TEXT NOT NULL DEFAULT '[]'
+        error_messages TEXT NOT NULL DEFAULT '[]', metadata TEXT NOT NULL DEFAULT '{}'
       );
       CREATE TABLE IF NOT EXISTS connector_state (
         connector_id TEXT PRIMARY KEY, state TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -1117,7 +1210,10 @@ export class IndexDatabase {
       ['project_confidence', 'REAL'],
       ['project_reason', 'TEXT']
     ])
-    ensureColumns(this.db, 'import_records', [['error_messages', "TEXT NOT NULL DEFAULT '[]'"]])
+    ensureColumns(this.db, 'import_records', [
+      ['error_messages', "TEXT NOT NULL DEFAULT '[]'"],
+      ['metadata', "TEXT NOT NULL DEFAULT '{}'"]
+    ])
     ensureColumns(this.db, 'provider_memories', [
       ['source_type', "TEXT NOT NULL DEFAULT 'provider_saved_memory'"],
       ['user_confirmed', 'INTEGER NOT NULL DEFAULT 0'],
@@ -1300,6 +1396,15 @@ function parseJsonRecord(value: unknown): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+function providerLevelFromSourceType(
+  sourceType: string
+): 'project' | 'workspace' | 'conversation' | 'unknown' {
+  if (sourceType === 'project_instruction') return 'project'
+  if (sourceType === 'workspace_instruction') return 'workspace'
+  if (sourceType === 'provider_summary') return 'conversation'
+  return 'unknown'
 }
 
 function ensureColumns(

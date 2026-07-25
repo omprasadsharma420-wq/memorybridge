@@ -46,7 +46,7 @@ export async function createHarness(patch: Partial<AppSettings> = {}): Promise<T
     settings,
     async cleanup() {
       repository.close()
-      vault.disconnect()
+      await vault.disconnect()
       await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
     }
   }

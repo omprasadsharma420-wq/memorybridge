@@ -119,7 +119,7 @@ describe('vault and repository', () => {
     const expectedId = harness.vault.identity.vault_id
     try {
       harness.repository.close()
-      harness.vault.disconnect()
+      await harness.vault.disconnect()
       await writeFile(
         join(harness.directory, '.memorybridge.lock.json'),
         JSON.stringify({
@@ -128,7 +128,8 @@ describe('vault and repository', () => {
           machine_id: 'stale-fixture',
           application_version: '0.0.0',
           acquired_at: '2000-01-01T00:00:00.000Z',
-          heartbeat_at: '2000-01-01T00:00:00.000Z'
+          heartbeat_at: '2000-01-01T00:00:00.000Z',
+          ownership_token: 'stale-fixture-token'
         })
       )
       const reconnected = new VaultManager()
@@ -137,7 +138,7 @@ describe('vault and repository', () => {
         writable: true,
         manifest: { vault_id: expectedId }
       })
-      reconnected.disconnect()
+      await reconnected.disconnect()
     } finally {
       await harness.cleanup()
     }

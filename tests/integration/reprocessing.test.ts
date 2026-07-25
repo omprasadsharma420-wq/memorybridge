@@ -33,6 +33,11 @@ class FlakyExtractionProvider implements AIProvider {
   validateConfiguration(): ReturnType<MockProvider['validateConfiguration']> {
     return this.delegate.validateConfiguration()
   }
+  testCapability(
+    capability: Parameters<MockProvider['testCapability']>[0]
+  ): ReturnType<MockProvider['testCapability']> {
+    return this.delegate.testCapability(capability)
+  }
   listModels(): Promise<string[]> {
     return this.delegate.listModels()
   }

@@ -2,6 +2,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it } from 'vitest'
 import { createHarness } from '../helpers'
+import { createId } from '../../src/shared/ids'
+import { memorySchema } from '../../src/shared/schemas'
 import { McpQueryService } from '../../src/main/mcp/query-service'
 import { createMcpServer } from '../../src/main/mcp/server'
 
@@ -20,6 +22,33 @@ describe('MCP server contract', () => {
       await harness.chatService.sendMessage(chat.chat_id, 'What is the launch owner?')
       await harness.chatService.sendMessage(chat.chat_id, 'The launch report is due by 2026-09-15.')
       const memory = (await harness.repository.listMemories(chat.chat_id))[0]!
+      const otherProject = await harness.repository.createProject('Other MCP Project')
+      const otherChat = await harness.repository.createChat(otherProject.project_id)
+      await harness.chatService.sendMessage(
+        otherChat.chat_id,
+        'We decided the private launch code is ORCHID-91.'
+      )
+      const otherMemory = (await harness.repository.listMemories(otherChat.chat_id))[0]!
+      const historicalMemory = memorySchema.parse({
+        ...otherMemory,
+        memory_id: createId('mem'),
+        statement: 'The historical private launch code was AZURE-10.',
+        state: 'superseded',
+        superseded_by: otherMemory.memory_id,
+        evidence_ids: []
+      })
+      const disputedMemory = memorySchema.parse({
+        ...otherMemory,
+        memory_id: createId('mem'),
+        statement: 'The disputed fallback launch code is AMBER-22.',
+        state: 'disputed',
+        evidence_ids: []
+      })
+      await harness.repository.replaceChatMemories(otherChat.chat_id, [
+        otherMemory,
+        historicalMemory,
+        disputedMemory
+      ])
       query = await McpQueryService.open(harness.directory)
       const server = createMcpServer(query)
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
@@ -58,10 +87,104 @@ describe('MCP server contract', () => {
       const evidence = parseText(
         await client.callTool({
           name: 'get_memory_evidence',
-          arguments: { memoryId: memory.memory_id, limit: 1 }
+          arguments: { memoryId: memory.memory_id, projectId: project.project_id, limit: 1 }
         })
       )
       expect(evidence).toHaveLength(1)
+      expect(
+        parseText(
+          await client.callTool({
+            name: 'get_memory_evidence',
+            arguments: { memoryId: memory.memory_id, limit: 1 }
+          })
+        )
+      ).toHaveLength(0)
+      expect(
+        parseText(
+          await client.callTool({
+            name: 'get_memory_evidence',
+            arguments: {
+              memoryId: otherMemory.memory_id,
+              projectId: project.project_id,
+              limit: 10
+            }
+          })
+        )
+      ).toHaveLength(0)
+      expect(
+        parseText(
+          await client.callTool({
+            name: 'get_chat_excerpt',
+            arguments: {
+              chatId: otherChat.chat_id,
+              projectId: project.project_id,
+              limit: 10
+            }
+          })
+        )
+      ).toHaveLength(0)
+      expect(
+        parseText(
+          await client.callTool({
+            name: 'get_chat_excerpt',
+            arguments: {
+              chatId: otherChat.chat_id,
+              projectId: otherProject.project_id,
+              limit: 10
+            }
+          })
+        )
+      ).not.toHaveLength(0)
+      expect(
+        parseText(
+          await client.callTool({
+            name: 'search_memory',
+            arguments: {
+              query: 'AZURE-10',
+              projectId: otherProject.project_id,
+              limit: 10
+            }
+          })
+        )
+      ).toHaveLength(0)
+      expect(
+        parseText(
+          await client.callTool({
+            name: 'search_memory',
+            arguments: {
+              query: 'AZURE-10',
+              projectId: otherProject.project_id,
+              includeHistorical: true,
+              limit: 10
+            }
+          })
+        )
+      ).toHaveLength(1)
+      expect(
+        parseText(
+          await client.callTool({
+            name: 'search_memory',
+            arguments: {
+              query: 'AMBER-22',
+              projectId: otherProject.project_id,
+              limit: 10
+            }
+          })
+        )
+      ).toHaveLength(0)
+      expect(
+        parseText(
+          await client.callTool({
+            name: 'search_memory',
+            arguments: {
+              query: 'AMBER-22',
+              projectId: otherProject.project_id,
+              includeDisputed: true,
+              limit: 10
+            }
+          })
+        )
+      ).toHaveLength(1)
       expect(
         parseText(
           await client.callTool({
@@ -77,12 +200,28 @@ describe('MCP server contract', () => {
             arguments: { projectId: project.project_id, limit: 10 }
           })
         ).some((item) => hasType(item, 'open_question'))
+      ).toBe(false)
+      expect(
+        parseText(
+          await client.callTool({
+            name: 'get_open_questions',
+            arguments: {
+              projectId: project.project_id,
+              includeNeedsReview: true,
+              limit: 10
+            }
+          })
+        ).some((item) => hasType(item, 'open_question'))
       ).toBe(true)
       expect(
         parseText(
           await client.callTool({
             name: 'get_current_project_state',
-            arguments: { projectId: project.project_id, limit: 10 }
+            arguments: {
+              projectId: project.project_id,
+              includeNeedsReview: true,
+              limit: 10
+            }
           })
         ).some((item) => hasType(item, 'deadline'))
       ).toBe(true)

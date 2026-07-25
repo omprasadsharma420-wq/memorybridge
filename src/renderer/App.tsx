@@ -3,9 +3,12 @@ import type {
   BootstrapState,
   ConnectorCapabilitiesView,
   ImportPreviewResult,
+  ImportProgressView,
   McpConfiguration,
   RetrievedContextItem,
   SearchResult,
+  StorageProgress,
+  VaultStorageStats,
   VaultStatus
 } from '../shared/contracts'
 import type {
@@ -20,7 +23,8 @@ import type {
   TopicSegment
 } from '../shared/schemas'
 
-type Panel = 'memory' | 'search' | 'providers' | 'topics' | 'imports' | 'mcp' | 'settings'
+type Panel =
+  'memory' | 'search' | 'providers' | 'topics' | 'imports' | 'storage' | 'mcp' | 'settings'
 
 export function App(): React.JSX.Element {
   const [state, setState] = useState<BootstrapState | null>(null)
@@ -51,7 +55,12 @@ export function App(): React.JSX.Element {
       setMessages((current) => upsertMessage(current, message))
     })
     const offVault = window.memoryBridge.onVaultStatus((vault) => {
-      setState((current) => (current ? { ...current, vault } : current))
+      setState((current) => {
+        if (vault.writable && current && !current.vault.writable) {
+          void refresh().catch((error: unknown) => setNotice(errorMessage(error)))
+        }
+        return current ? { ...current, vault } : current
+      })
     })
     const offProcessing = window.memoryBridge.onProcessingProgress((progress) => {
       if (progress.status === 'running') {
@@ -62,6 +71,11 @@ export function App(): React.JSX.Element {
       } else {
         setActiveProcessingScopeId(null)
         if (progress.status === 'cancelled') setNotice('Processing cancelled safely.')
+        else if (progress.status === 'complete')
+          setNotice(
+            `Processing complete: ${progress.completedChats} chat(s), ${progress.completedSegments} segment(s).`
+          )
+        else if (progress.status === 'failed') setNotice('Processing stopped after a failure.')
       }
     })
     return () => {
@@ -83,6 +97,14 @@ export function App(): React.JSX.Element {
   }, [selectedChatId])
 
   useEffect(() => {
+    if (!state?.vault.writable || !state.settings.onboardingCompleted) return
+    void window.memoryBridge
+      .listMemories()
+      .then(setMemories)
+      .catch((error: unknown) => setNotice(errorMessage(error)))
+  }, [state?.vault.manifest?.vault_id, state?.vault.writable, state?.settings.onboardingCompleted])
+
+  useEffect(() => {
     messagesEnd.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
@@ -97,6 +119,26 @@ export function App(): React.JSX.Element {
   if (!state) return <LoadingScreen />
   if (!state.vault.connected && !state.vault.path) {
     return <VaultWelcome onState={setState} onError={setNotice} notice={notice} />
+  }
+  if (state.vault.connected && !state.vault.writable && state.vault.reason === 'locked') {
+    return (
+      <LockedVaultScreen
+        vault={state.vault}
+        onReconnect={async () => setState(await window.memoryBridge.chooseAndOpenVault())}
+        notice={notice}
+        onError={(message) => setNotice(message)}
+      />
+    )
+  }
+  if (state.vault.writable && !state.settings.onboardingCompleted) {
+    return (
+      <FirstRunOnboarding
+        state={state}
+        onState={setState}
+        onError={(message) => setNotice(message)}
+        notice={notice}
+      />
+    )
   }
 
   const selectedChat = state.chats.find((chat) => chat.chat_id === selectedChatId) ?? null
@@ -433,7 +475,8 @@ function VaultWelcome({
           </button>
         </div>
         <p className="privacy-note">
-          No account. No telemetry. Mock mode works without an API key.
+          No MemoryBridge cloud account or telemetry. Imports and keyword search work without an API
+          key. If you configure a provider, selected bounded text can be sent to that endpoint.
         </p>
         {notice && <p className="inline-error">{notice}</p>}
       </div>
@@ -453,6 +496,278 @@ function VaultWelcome({
           Milestone <b>complete</b>
         </div>
       </div>
+    </div>
+  )
+}
+
+function LockedVaultScreen({
+  vault,
+  onReconnect,
+  notice,
+  onError
+}: {
+  vault: VaultStatus
+  onReconnect: () => Promise<void>
+  notice: string | null
+  onError: (message: string) => void
+}): React.JSX.Element {
+  return (
+    <div className="locked-vault-screen">
+      <BrandMark large />
+      <p className="eyebrow">VAULT LOCKED</p>
+      <h1>Another MemoryBridge instance owns this vault.</h1>
+      <p>
+        Browsing and changes are disabled because a readable repository was not opened. Close the
+        other instance, then retry. MemoryBridge will not save anything to a fallback location.
+      </p>
+      <p className="path-copy">{vault.path}</p>
+      <button
+        className="primary"
+        onClick={() => void onReconnect().catch((error: unknown) => onError(errorMessage(error)))}
+      >
+        Retry or reconnect
+      </button>
+      {notice && (
+        <p className="onboarding-notice" role="status">
+          {notice}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function FirstRunOnboarding({
+  state,
+  onState,
+  onError,
+  notice
+}: {
+  state: BootstrapState
+  onState: (state: BootstrapState) => void
+  onError: (message: string) => void
+  notice: string | null
+}): React.JSX.Element {
+  const [step, setStep] = useState<2 | 3 | 4 | 5>(2)
+  const [storage, setStorage] = useState<VaultStorageStats | null>(null)
+  const [preview, setPreview] = useState<ImportPreviewResult | null>(null)
+  const [result, setResult] = useState<ImportRecord | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [progress, setProgress] = useState<ImportProgressView | null>(null)
+  useEffect(() => {
+    const offProgress = window.memoryBridge.onImportProgress(setProgress)
+    void window.memoryBridge
+      .getVaultStorage()
+      .then(setStorage)
+      .catch((error: unknown) => onError(errorMessage(error)))
+    return offProgress
+  }, [onError])
+  const chooseMode = async (mode: AppSettings['processingMode']): Promise<void> => {
+    const saved = await window.memoryBridge.updateSettings({
+      processingMode: mode,
+      mockMode: mode !== 'ai',
+      provider: mode === 'ai' ? 'openai-compatible' : 'mock',
+      memoryExtractionEnabled: mode !== 'offline',
+      semanticIndexingEnabled: false
+    })
+    onState({ ...state, settings: saved })
+    setStep(4)
+  }
+  const finish = async (): Promise<void> => {
+    const settings = await window.memoryBridge.updateSettings({ onboardingCompleted: true })
+    onState({ ...(await window.memoryBridge.bootstrap()), settings })
+  }
+  const importChosen = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const nextPreview = await window.memoryBridge.chooseImport()
+      setPreview(nextPreview)
+      if (!nextPreview) return
+    } catch (error) {
+      onError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const executeChosen = async (): Promise<void> => {
+    if (!preview) return
+    setBusy(true)
+    try {
+      const imported = await window.memoryBridge.executeImport({ token: preview.token })
+      setResult(await window.memoryBridge.validateImport(imported.import_id))
+      setStep(5)
+    } catch (error) {
+      onError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const loadDemo = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const loaded = await window.memoryBridge.loadDemoArchive()
+      setResult(loaded.importRecord)
+      setStep(5)
+    } catch (error) {
+      onError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const scanInbox = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const records = await window.memoryBridge.scanImportInbox()
+      if (!records.length) {
+        onError('The import inbox contains no supported files.')
+        return
+      }
+      setResult(await window.memoryBridge.validateImport(records[0]!.import_id))
+      setStep(5)
+    } catch (error) {
+      onError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="onboarding-shell">
+      <header>
+        <BrandMark />
+        <span>Setup {step} of 5</span>
+      </header>
+      {step === 2 && (
+        <section>
+          <p className="eyebrow">STORAGE SELECTED</p>
+          <h1>Your vault is ready.</h1>
+          <p>
+            Conversations, indexes, memory, and evidence will stay in this selected vault. No
+            conversation is redirected to application storage.
+          </p>
+          <div className="onboarding-summary">
+            <b>{state.vault.manifest?.vault_id}</b>
+            <span>{state.vault.path}</span>
+            <span>{state.vault.writable ? 'Writable' : 'Unavailable'}</span>
+            <span>
+              {storage
+                ? `${formatHumanBytes(storage.freeDeviceBytes)} free`
+                : 'Calculating capacity'}
+            </span>
+          </div>
+          <button className="primary" onClick={() => setStep(3)}>
+            Continue
+          </button>
+        </section>
+      )}
+      {step === 3 && (
+        <section>
+          <p className="eyebrow">PROCESSING MODE</p>
+          <h1>Choose how MemoryBridge should process chats.</h1>
+          <div className="mode-options">
+            <button onClick={() => void chooseMode('offline')}>
+              <b>Offline storage and search</b>
+              <span>Import, browse, and keyword search. No API key required.</span>
+            </button>
+            <button onClick={() => void chooseMode('ai')}>
+              <b>AI memory intelligence</b>
+              <span>
+                Structured extraction and optional embeddings through your API key or local
+                compatible endpoint.
+              </span>
+            </button>
+            <button data-testid="demo-mode" onClick={() => void chooseMode('demo')}>
+              <b>Demo mode</b>
+              <span>Deterministic synthetic extraction for product testing only.</span>
+            </button>
+          </div>
+          <small>
+            ChatGPT subscriptions and API billing are separate. Import and keyword indexing work
+            without an API key.
+          </small>
+        </section>
+      )}
+      {step === 4 && (
+        <section>
+          <p className="eyebrow">FIRST CONVERSATION</p>
+          <h1>Import an archive or start locally.</h1>
+          <div className="onboarding-actions">
+            <button disabled={busy} onClick={() => void importChosen()}>
+              Import ChatGPT ZIP or JSON
+            </button>
+            <button disabled={busy} onClick={() => void importChosen()}>
+              Import Markdown or text
+            </button>
+            <button disabled={busy} onClick={() => void scanInbox()}>
+              Scan Import Inbox
+            </button>
+            <button data-testid="load-demo" disabled={busy} onClick={() => void loadDemo()}>
+              Load bundled synthetic demo
+            </button>
+            <button
+              data-testid="start-native"
+              disabled={busy}
+              onClick={() => {
+                setResult(null)
+                setStep(5)
+              }}
+            >
+              Start a native conversation
+            </button>
+          </div>
+          {busy && progress && (
+            <div className="import-progress" role="status">
+              <b>{humanize(progress.phase)}</b>
+              <span>
+                {progress.totalBytes
+                  ? `${Math.min(
+                      100,
+                      Math.round((progress.processedBytes / progress.totalBytes) * 100)
+                    )}%`
+                  : `${progress.completedConversations} of ${
+                      progress.totalConversations || '?'
+                    } conversations`}
+              </span>
+            </div>
+          )}
+          {preview && (
+            <article className="onboarding-summary">
+              <b>{preview.fileName}</b>
+              <span>
+                {preview.conversations} conversations, {preview.messages} messages
+              </span>
+              {preview.warnings.map((warning) => (
+                <small key={warning}>{warning}</small>
+              ))}
+              <button className="primary" disabled={busy} onClick={() => void executeChosen()}>
+                Import archive
+              </button>
+            </article>
+          )}
+        </section>
+      )}
+      {step === 5 && (
+        <section>
+          <p className="eyebrow">READY TO REVIEW</p>
+          <h1>
+            {result ? 'Your first import is ready.' : 'Your vault is ready for a conversation.'}
+          </h1>
+          {result ? (
+            <div className="onboarding-summary">
+              <span>{result.imported_count} conversations added</span>
+              <span>{result.message_count} messages discovered</span>
+              <span>{result.changed_count} conversations updated</span>
+              <span>{result.skipped_count} unchanged</span>
+              <span>{result.review_count} items requiring review</span>
+              <span>Validation: {result.validation_status}</span>
+            </div>
+          ) : (
+            <p>Create a native chat from the sidebar after setup closes.</p>
+          )}
+          <button data-testid="finish-setup" className="primary" onClick={() => void finish()}>
+            Open MemoryBridge
+          </button>
+        </section>
+      )}
+      {notice && <p className="inline-error">{notice}</p>}
     </div>
   )
 }
@@ -548,6 +863,7 @@ function Sidebar(props: {
         <button onClick={() => props.onPanel('providers')}>Providers</button>
         <button onClick={() => props.onPanel('topics')}>Topics</button>
         <button onClick={() => props.onPanel('imports')}>Imports & sync</button>
+        <button onClick={() => props.onPanel('storage')}>Vault storage</button>
         <button onClick={() => props.onPanel('mcp')}>MCP & integrations</button>
         <button onClick={() => props.onPanel('settings')}>Vault settings</button>
         <div
@@ -565,7 +881,9 @@ function Sidebar(props: {
               {props.vault.writable
                 ? 'Vault connected'
                 : props.vault.connected
-                  ? 'Vault read-only'
+                  ? props.vault.reason === 'locked'
+                    ? 'Vault locked'
+                    : 'Vault read-only'
                   : 'Vault offline'}
             </b>
             <small>{formatBytes(props.vault.freeBytes)} free</small>
@@ -767,6 +1085,9 @@ function Inspector({
         <button className={panel === 'imports' ? 'active' : ''} onClick={() => setPanel('imports')}>
           Imports
         </button>
+        <button className={panel === 'storage' ? 'active' : ''} onClick={() => setPanel('storage')}>
+          Storage
+        </button>
         <button className={panel === 'mcp' ? 'active' : ''} onClick={() => setPanel('mcp')}>
           MCP
         </button>
@@ -791,7 +1112,9 @@ function Inspector({
       {panel === 'search' && (
         <SearchPanel projects={state.projects} chats={state.chats} onSelectChat={onSelectChat} />
       )}
-      {panel === 'providers' && <ProvidersPanel onNotice={onNotice} />}
+      {panel === 'providers' && (
+        <ProvidersPanel projects={state.projects} chats={state.chats} onNotice={onNotice} />
+      )}
       {panel === 'topics' && <TopicsPanel selectedChatId={selectedChatId} onNotice={onNotice} />}
       {panel === 'imports' && (
         <ImportPanel
@@ -802,6 +1125,7 @@ function Inspector({
           onNotice={onNotice}
         />
       )}
+      {panel === 'storage' && <StoragePanel vault={state.vault} onNotice={onNotice} />}
       {panel === 'mcp' && <McpPanel />}
       {panel === 'settings' && (
         <SettingsPanel
@@ -1131,7 +1455,15 @@ function MemoryCard({
   )
 }
 
-function ProvidersPanel({ onNotice }: { onNotice: (message: string) => void }): React.JSX.Element {
+function ProvidersPanel({
+  projects,
+  chats,
+  onNotice
+}: {
+  projects: Project[]
+  chats: Chat[]
+  onNotice: (message: string) => void
+}): React.JSX.Element {
   const [connectors, setConnectors] = useState<ConnectorCapabilitiesView[]>([])
   const [providerMemories, setProviderMemories] = useState<ProviderMemory[]>([])
   useEffect(() => {
@@ -1185,6 +1517,8 @@ function ProvidersPanel({ onNotice }: { onNotice: (message: string) => void }): 
           key={memory.provider_memory_id}
           memory={memory}
           allMemories={providerMemories}
+          projects={projects}
+          chats={chats}
           act={act}
         />
       ))}
@@ -1202,10 +1536,14 @@ function ProvidersPanel({ onNotice }: { onNotice: (message: string) => void }): 
 function ProviderMemoryCard({
   memory,
   allMemories,
+  projects,
+  chats,
   act
 }: {
   memory: ProviderMemory
   allMemories: ProviderMemory[]
+  projects: Project[]
+  chats: Chat[]
   act: (input: Parameters<typeof window.memoryBridge.providerMemoryAction>[0]) => Promise<void>
 }): React.JSX.Element {
   const [editing, setEditing] = useState(false)
@@ -1247,13 +1585,60 @@ function ProviderMemoryCard({
       <div className="memory-dates">
         <span>Source: {memory.source_label}</span>
         <span>Type: {memory.source_type.replaceAll('_', ' ')}</span>
-        <span>Scope: {memory.scope.kind}</span>
+        <span>
+          Scope: {memory.scope.kind}
+          {memory.scope.kind === 'provider' ? ` (${memory.scope.level})` : ''}
+        </span>
         <span>User confirmed: {memory.user_confirmed ? 'yes' : 'no'}</span>
         {memory.raw_source_reference && <span>Reference: {memory.raw_source_reference}</span>}
       </div>
       <div className="memory-actions">
+        <select
+          aria-label="Provider memory scope"
+          value={
+            memory.scope.kind === 'global'
+              ? 'global'
+              : memory.scope.kind === 'project'
+                ? `project:${memory.scope.project_id}`
+                : memory.scope.kind === 'conversation'
+                  ? `conversation:${memory.scope.chat_id}`
+                  : ''
+          }
+          onChange={(event) => {
+            const [kind, id] = event.target.value.split(':')
+            if (!kind) return
+            const scope =
+              kind === 'global'
+                ? ({ kind: 'global' } as const)
+                : kind === 'project' && id
+                  ? ({ kind: 'project', project_id: id } as const)
+                  : id
+                    ? ({ kind: 'conversation', chat_id: id } as const)
+                    : null
+            if (scope)
+              void act({
+                providerMemoryId: memory.provider_memory_id,
+                action: 'change_scope',
+                scope
+              })
+          }}
+        >
+          <option value="">Choose MemoryBridge scope</option>
+          <option value="global">Global</option>
+          {projects.map((project) => (
+            <option key={project.project_id} value={`project:${project.project_id}`}>
+              Project: {project.name}
+            </option>
+          ))}
+          {chats.map((chat) => (
+            <option key={chat.chat_id} value={`conversation:${chat.chat_id}`}>
+              Conversation: {chat.title}
+            </option>
+          ))}
+        </select>
         {!memory.user_confirmed && memory.state !== 'deleted' && (
           <button
+            disabled={memory.scope.kind === 'provider'}
             onClick={() =>
               void act({ providerMemoryId: memory.provider_memory_id, action: 'confirm' })
             }
@@ -1385,6 +1770,12 @@ function ImportPanel({
   const [preview, setPreview] = useState<ImportPreviewResult | null>(null)
   const [records, setRecords] = useState<ImportRecord[]>([])
   const [busy, setBusy] = useState(false)
+  const [progress, setProgress] = useState<ImportProgressView | null>(null)
+  const [activeToken, setActiveToken] = useState<string | null>(null)
+  useEffect(() => {
+    void window.memoryBridge.listImportRecords().then(setRecords)
+    return window.memoryBridge.onImportProgress(setProgress)
+  }, [])
   const choose = async (): Promise<void> => {
     try {
       setPreview(await window.memoryBridge.chooseImport())
@@ -1395,6 +1786,7 @@ function ImportPanel({
   const execute = async (): Promise<void> => {
     if (!preview) return
     setBusy(true)
+    setActiveToken(preview.token)
     try {
       const record = await window.memoryBridge.executeImport({ token: preview.token })
       setRecords((current) => [record, ...current])
@@ -1407,6 +1799,7 @@ function ImportPanel({
       onNotice(errorMessage(error))
     } finally {
       setBusy(false)
+      setActiveToken(null)
     }
   }
   const scan = async (): Promise<void> => {
@@ -1431,8 +1824,8 @@ function ImportPanel({
         </div>
       </div>
       <p>
-        Import a ChatGPT export ZIP or generic JSON, JSONL, Markdown, or text file. Files stay
-        local.
+        Import a ChatGPT export ZIP or generic JSON, JSONL, Markdown, or text file. This is archive
+        import, not live provider synchronization. Files stay local.
       </p>
       <div className="memory-actions">
         <button disabled={busy} onClick={() => void choose()}>
@@ -1441,7 +1834,42 @@ function ImportPanel({
         <button disabled={busy} onClick={() => void scan()}>
           Scan vault inbox
         </button>
+        <button
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true)
+            try {
+              const loaded = await window.memoryBridge.loadDemoArchive()
+              setRecords((current) => [loaded.importRecord, ...current])
+              await onImported()
+              onNotice(
+                `Synthetic demo loaded: ${loaded.importRecord.imported_count} conversations, ${loaded.processing.memories.length} extracted memories.`
+              )
+            } catch (error) {
+              onNotice(errorMessage(error))
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          Load synthetic demo
+        </button>
       </div>
+      {busy && progress && (
+        <div className="import-progress" role="status">
+          <b>{humanize(progress.phase)}</b>
+          <span>
+            {progress.totalBytes
+              ? `${Math.min(100, Math.round((progress.processedBytes / progress.totalBytes) * 100))}%`
+              : `${progress.completedConversations} of ${progress.totalConversations || '?'} conversations`}
+          </span>
+          {activeToken && (
+            <button onClick={() => void window.memoryBridge.cancelImport(activeToken)}>
+              Cancel import
+            </button>
+          )}
+        </div>
+      )}
       {preview && (
         <article className="memory-card">
           <div className="memory-top">
@@ -1473,6 +1901,38 @@ function ImportPanel({
             {record.imported_count} added · {record.changed_count} changed · {record.skipped_count}{' '}
             unchanged · {record.review_count} requiring review · {record.error_count} errors
           </p>
+          <div className="memory-dates">
+            <span>Connector: {record.connector_version}</span>
+            <span>Archive hash: {record.archive_hash.slice(0, 16)}…</span>
+            <span>Discovered: {record.discovered_count}</span>
+            <span>Branches handled: {record.branches_handled}</span>
+            <span>Malformed: {record.malformed_count}</span>
+            <span>Validation: {record.validation_status.replaceAll('_', ' ')}</span>
+          </div>
+          <button
+            onClick={async () => {
+              try {
+                const validated = await window.memoryBridge.validateImport(record.import_id)
+                setRecords((current) =>
+                  current.map((item) => (item.import_id === validated.import_id ? validated : item))
+                )
+                onNotice(
+                  validated.validation_status === 'passed'
+                    ? 'Import verification passed.'
+                    : `Import verification found ${validated.validation_issues.length} warning(s).`
+                )
+              } catch (error) {
+                onNotice(errorMessage(error))
+              }
+            }}
+          >
+            Verify imported archive
+          </button>
+          {record.validation_issues.map((issue) => (
+            <small className="inline-error" key={issue}>
+              {issue}
+            </small>
+          ))}
           {record.error_messages.map((message) => (
             <small className="inline-error" key={message}>
               {message}
@@ -1480,6 +1940,163 @@ function ImportPanel({
           ))}
         </article>
       ))}
+    </div>
+  )
+}
+
+function StoragePanel({
+  vault,
+  onNotice
+}: {
+  vault: VaultStatus
+  onNotice: (message: string) => void
+}): React.JSX.Element {
+  const [stats, setStats] = useState<VaultStorageStats | null>(null)
+  const [progress, setProgress] = useState<StorageProgress | null>(null)
+  const [busy, setBusy] = useState(false)
+  const load = useCallback(
+    async (refresh = false): Promise<void> => {
+      setBusy(true)
+      try {
+        setStats(await window.memoryBridge.getVaultStorage(refresh))
+      } catch (error) {
+        onNotice(errorMessage(error))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [onNotice]
+  )
+  useEffect(() => {
+    void load()
+    return window.memoryBridge.onStorageProgress(setProgress)
+  }, [load])
+  const rows: Array<[string, number | null]> = stats
+    ? [
+        ['Total vault', stats.totalVaultBytes],
+        ['Raw transcripts', stats.transcriptBytes],
+        ['Index and database', stats.indexBytes],
+        ['Structured memory', stats.structuredMemoryBytes],
+        ['Evidence', stats.evidenceBytes],
+        ['Embedding payload', stats.embeddingBytes],
+        ['Attachments', stats.attachmentBytes],
+        ['Retained import archives', stats.importArchiveBytes]
+      ]
+    : []
+  return (
+    <div className="panel-content storage-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">SELECTED VAULT</p>
+          <h2>Vault storage</h2>
+        </div>
+      </div>
+      {!stats ? (
+        <PanelEmpty
+          icon="◫"
+          title={busy ? 'Calculating storage' : 'Storage is unavailable'}
+          copy={
+            progress
+              ? `${progress.scannedFiles} files inspected (${formatHumanBytes(progress.scannedBytes)}).`
+              : 'Refresh to calculate capacity without reading file contents.'
+          }
+        />
+      ) : (
+        <>
+          <section className="storage-identity">
+            <h3>{stats.vaultName || 'MemoryBridge vault'}</h3>
+            <p className="path-copy">{stats.path}</p>
+            <div className="memory-dates">
+              <span>Vault ID: {stats.vaultId}</span>
+              <span>Connection: {stats.connectionStatus}</span>
+              <span>Write status: {stats.writeStatus}</span>
+              <span>Storage type: {stats.storageType}</span>
+              <span>Volume: {stats.volumeName ?? 'Unavailable'}</span>
+              <span>Filesystem ID: {stats.filesystem ?? 'Unavailable'}</span>
+            </div>
+          </section>
+          <section>
+            <h3>Device capacity</h3>
+            <div className="storage-metrics">
+              <span>
+                <b>{formatHumanBytes(stats.totalDeviceBytes)}</b>
+                Total
+              </span>
+              <span>
+                <b>{formatHumanBytes(stats.freeDeviceBytes)}</b>
+                Free
+              </span>
+              <span>
+                <b>{formatHumanBytes(stats.usedDeviceBytes)}</b>
+                Used
+              </span>
+            </div>
+          </section>
+          <section>
+            <h3>MemoryBridge data</h3>
+            <dl className="storage-breakdown">
+              {rows.map(([label, bytes]) => (
+                <div key={label}>
+                  <dt>{label}</dt>
+                  <dd>{formatHumanBytes(bytes)}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+          <section>
+            <h3>Vault records</h3>
+            <div className="storage-metrics">
+              <span>
+                <b>{stats.projects.toLocaleString()}</b>
+                Projects
+              </span>
+              <span>
+                <b>{stats.chats.toLocaleString()}</b>
+                Chats
+              </span>
+              <span>
+                <b>{stats.messages.toLocaleString()}</b>
+                Messages
+              </span>
+              <span>
+                <b>{stats.memories.toLocaleString()}</b>
+                Memories
+              </span>
+            </div>
+            <small>Last calculated {new Date(stats.calculatedAt).toLocaleString()}</small>
+          </section>
+          {stats.warnings.map((warning) => (
+            <p className="inline-error" key={warning}>
+              {warning}
+            </p>
+          ))}
+        </>
+      )}
+      <div className="row-actions">
+        <button disabled={busy || !vault.writable} onClick={() => void load(true)}>
+          Refresh capacity
+        </button>
+        {busy && (
+          <button onClick={() => void window.memoryBridge.cancelVaultStorage()}>
+            Cancel calculation
+          </button>
+        )}
+        <button
+          disabled={!vault.writable}
+          onClick={async () => {
+            try {
+              const result = await window.memoryBridge.verifyVaultLocation()
+              onNotice(
+                `Vault location verified at ${new Date(result.checkedAt).toLocaleTimeString()}.`
+              )
+            } catch (error) {
+              onNotice(errorMessage(error))
+            }
+          }}
+        >
+          Verify vault location
+        </button>
+      </div>
     </div>
   )
 }
@@ -1771,7 +2388,7 @@ function SettingsPanel({
   )
   const [providerCapabilities, setProviderCapabilities] = useState<
     Awaited<ReturnType<typeof window.memoryBridge.testConnection>>['capabilities'] | null
-  >(null)
+  >(state.settings.providerCapabilities)
   const save = async (): Promise<void> => {
     const saved = await window.memoryBridge.updateSettings(settings)
     onSettings(saved)
@@ -1787,6 +2404,10 @@ function SettingsPanel({
       </div>
       <section>
         <h3>Provider</h3>
+        <p className="path-copy">
+          ChatGPT subscriptions and API access are billed and authenticated separately. Offline
+          import, storage, indexing, browsing, and keyword search do not require an API key.
+        </p>
         <label>
           Mode
           <select
@@ -1863,7 +2484,7 @@ function SettingsPanel({
               onNotice(result.message)
             }}
           >
-            Test
+            Test authentication
           </button>
           <button
             onClick={async () => {
@@ -1876,12 +2497,32 @@ function SettingsPanel({
           </button>
         </div>
         {providerCapabilities && (
-          <div className="memory-dates">
-            {Object.entries(providerCapabilities).map(([name, available]) => (
-              <span key={name}>
-                {humanize(name)}: {available ? 'available' : 'not detected'}
-              </span>
+          <div className="capability-grid">
+            {(
+              [
+                'chat',
+                'streaming',
+                'structuredOutput',
+                'embeddings',
+                'modelListing',
+                'cancellation'
+              ] as const
+            ).map((name) => (
+              <button
+                key={name}
+                onClick={async () => {
+                  const result = await window.memoryBridge.testProviderCapability(name)
+                  setProviderCapabilities(result.capabilities)
+                  onNotice(result.message)
+                }}
+              >
+                <b>{humanize(name)}</b>
+                <span>{providerCapabilities[name] ? 'available' : 'not detected'}</span>
+              </button>
             ))}
+            <small>
+              Advanced extraction is available only when structured output passes its own test.
+            </small>
           </div>
         )}
       </section>
@@ -2032,7 +2673,7 @@ function SettingsPanel({
               )
             }}
           >
-            Reprocess full selected chat
+            Force reprocess selected chat
           </button>
         )}
         <label>
@@ -2061,7 +2702,7 @@ function SettingsPanel({
             )
           }}
         >
-          Reprocess selected project
+          Reprocess every chat in project
         </button>
         <button
           onClick={async () => {
@@ -2069,11 +2710,23 @@ function SettingsPanel({
             onMemories(await window.memoryBridge.listMemories())
             onBootstrap(await window.memoryBridge.bootstrap())
             onNotice(
-              `Vault rebuild complete: ${result.chats} chats, ${result.processedSegments} changed, ${result.failedSegments} failed.`
+              `Resume complete: ${result.chats} chats checked, ${result.processedSegments} processed, ${result.skippedSegments} already complete, ${result.failedSegments} failed.`
             )
           }}
         >
-          Rebuild derived memory for vault
+          Resume new, changed, or failed processing
+        </button>
+        <button
+          onClick={async () => {
+            const result = await window.memoryBridge.rebuildVaultIntelligence()
+            onMemories(await window.memoryBridge.listMemories())
+            onBootstrap(await window.memoryBridge.bootstrap())
+            onNotice(
+              `Derived-intelligence rebuild complete: ${result.chats} chats, ${result.processedSegments} segments, ${result.failedSegments} failed. Manual and explicitly confirmed memories were preserved.`
+            )
+          }}
+        >
+          Rebuild vault-derived intelligence
         </button>
         <button
           onClick={async () =>
@@ -2082,9 +2735,18 @@ function SettingsPanel({
         >
           Export content-free diagnostics
         </button>
+        <button
+          onClick={async () => {
+            await navigator.clipboard.writeText(await window.memoryBridge.getDiagnosticReport())
+            onNotice('Content-free diagnostic report copied.')
+          }}
+        >
+          Copy diagnostic report
+        </button>
       </section>
       <section className="transparency">
-        <h3>What leaves this device?</h3>
+        <h3>MemoryBridge {state.applicationVersion}</h3>
+        <h4>What leaves this device?</h4>
         <p>
           Chat text goes only to your configured provider when you send it. Extraction and
           embeddings may send selected text when enabled. The vault, indexes, and transcripts remain
@@ -2269,9 +2931,15 @@ function humanize(value: string): string {
   return value.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()
 }
 function formatBytes(bytes: number | null): string {
-  if (bytes === null) return 'Unknown'
-  const gb = bytes / 1024 ** 3
-  return `${gb.toFixed(gb >= 10 ? 0 : 1)} GB`
+  return formatHumanBytes(bytes)
+}
+function formatHumanBytes(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes)) return 'Unavailable'
+  if (bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)))
+  const value = bytes / 1024 ** index
+  return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`
 }
 function relativeDate(value: string): string {
   const days = Math.floor((Date.now() - Date.parse(value)) / 86_400_000)

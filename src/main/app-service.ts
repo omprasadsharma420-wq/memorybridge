@@ -1,4 +1,5 @@
 import { app, dialog, type BrowserWindow } from 'electron'
+import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { basename } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -18,7 +19,8 @@ import type {
   SendMessageInput,
   UpdateChatInput,
   UpdateProjectInput,
-  VaultStatus
+  VaultStatus,
+  VaultStorageStats
 } from '../shared/contracts'
 import type {
   AppSettings,
@@ -43,11 +45,13 @@ import { ImportService, type ImportPreview } from './ingestion/import-service'
 import { CredentialStore } from './providers/credential-store'
 import { MockProvider } from './providers/mock-provider'
 import { OpenAICompatibleProvider } from './providers/openai-compatible-provider'
-import type { AIProvider } from './providers/provider'
+import type { AIProvider, ProviderCapability } from './providers/provider'
 import { RetrievalEngine } from './retrieval/retrieval-engine'
-import { atomicWriteJson } from './storage/file-utils'
+import { atomicWriteJson, pathExists } from './storage/file-utils'
 import { VaultRepository, type RebuildStats } from './storage/repository'
 import { VaultManager } from './storage/vault'
+import { VaultCapacityService } from './storage/capacity'
+import { strToU8, zipSync } from 'fflate'
 
 export class AppService {
   readonly vault = new VaultManager()
@@ -59,7 +63,10 @@ export class AppService {
   private memoryEngine: MemoryEngine | null = null
   private chatService: ChatService | null = null
   private importService: ImportService | null = null
+  private capacityService: VaultCapacityService | null = null
+  private capacityController: AbortController | null = null
   private readonly pendingImports = new Map<string, string>()
+  private readonly importControllers = new Map<string, AbortController>()
   private readonly processingControllers = new Map<string, AbortController>()
   private window: BrowserWindow | null = null
   private readonly mockProvider = new MockProvider()
@@ -84,7 +91,7 @@ export class AppService {
       try {
         await this.vault.open(this.settings.lastVaultPath)
         if (this.vault.identity.vault_id !== registered.vault_id) {
-          this.vault.disconnect()
+          await this.vault.disconnect()
           return
         }
         if ((await this.vault.status()).writable) await this.initializeRepository()
@@ -93,14 +100,23 @@ export class AppService {
           event: 'vault.auto_open_failed',
           category: safeErrorCategory(error)
         })
-        this.vault.disconnect()
+        await this.vault.disconnect()
       }
     }
   }
 
   async bootstrap(): Promise<BootstrapState> {
-    const vault = await this.vault.status()
+    const currentVault = await this.vault.status()
+    const vault =
+      !currentVault.connected && this.settings.lastVaultPath
+        ? ({
+            ...currentVault,
+            path: this.settings.lastVaultPath,
+            reason: 'missing'
+          } as const)
+        : currentVault
     return {
+      applicationVersion: app.getVersion(),
       vault,
       settings: this.settings,
       hasStoredApiKey: await this.credentials.has(),
@@ -111,7 +127,7 @@ export class AppService {
 
   async createVault(path: string): Promise<BootstrapState> {
     this.closeRepository()
-    this.vault.disconnect()
+    await this.vault.disconnect()
     await this.vault.create(path)
     await this.rememberVault()
     this.settings = this.config.get()
@@ -122,7 +138,7 @@ export class AppService {
 
   async openVault(path: string): Promise<BootstrapState> {
     this.closeRepository()
-    this.vault.disconnect()
+    await this.vault.disconnect()
     await this.vault.open(path)
     await this.rememberVault()
     this.settings = this.config.get()
@@ -278,11 +294,46 @@ export class AppService {
   }> {
     const provider = await this.getProvider()
     const health = await provider.validateConfiguration()
+    await this.persistProviderCapabilities(provider.capabilities())
+    return { ...health, capabilities: provider.capabilities() }
+  }
+
+  async testProviderCapability(capability: ProviderCapability): Promise<{
+    ok: boolean
+    message: string
+    capabilities: ReturnType<AIProvider['capabilities']>
+  }> {
+    const provider = await this.getProvider()
+    const health = await provider.testCapability(capability)
+    await this.persistProviderCapabilities(provider.capabilities())
     return { ...health, capabilities: provider.capabilities() }
   }
 
   async rebuildIndex(): Promise<RebuildStats> {
     return this.repo.rebuildIndex()
+  }
+
+  async getVaultStorage(refresh = false): Promise<VaultStorageStats> {
+    this.capacityController?.abort()
+    const controller = new AbortController()
+    this.capacityController = controller
+    try {
+      return await this.capacity.calculate({
+        refresh,
+        signal: controller.signal,
+        onProgress: (progress) => this.window?.webContents.send('storage:progress', progress)
+      })
+    } finally {
+      if (this.capacityController === controller) this.capacityController = null
+    }
+  }
+
+  cancelVaultStorage(): void {
+    this.capacityController?.abort()
+  }
+
+  verifyVaultLocation(): Promise<{ ok: true; checkedAt: string }> {
+    return this.capacity.verifyWritable()
   }
 
   async rerunExtraction(chatId: string): Promise<Memory[]> {
@@ -299,7 +350,7 @@ export class AppService {
   }
 
   async reprocessChat(chatId: string): Promise<ProcessingResult> {
-    return this.processChats('chat', chatId, [await this.repo.getChat(chatId)])
+    return this.processChats('chat', chatId, [await this.repo.getChat(chatId)], { force: true })
   }
 
   async reprocessProject(projectId: string): Promise<ProcessingResult> {
@@ -313,11 +364,19 @@ export class AppService {
     const chats = (await this.repo.listChats()).filter(
       (chat) => chat.project_id === projectId || topicChatIds.has(chat.chat_id)
     )
-    return this.processChats('project', projectId, chats)
+    return this.processChats('project', projectId, chats, { force: true })
   }
 
   async reprocessVault(): Promise<ProcessingResult> {
     return this.processChats('vault', this.vault.identity.vault_id, await this.repo.listChats())
+  }
+
+  async rebuildVaultIntelligence(): Promise<ProcessingResult> {
+    await this.repo.resetDerivedIntelligence()
+    await this.repo.rebuildIndex()
+    return this.processChats('vault', this.vault.identity.vault_id, await this.repo.listChats(), {
+      force: true
+    })
   }
 
   private async processChats(
@@ -361,7 +420,7 @@ export class AppService {
                 combined.processedSegments + combined.skippedSegments + completedSegments,
               totalSegments: combined.segments + totalSegments
             }),
-          options.topicId && chat.chat_id === chats[0]?.chat_id ? options : {}
+          options.topicId ? (chat.chat_id === chats[0]?.chat_id ? options : {}) : options
         )
         combined.segments += result.segments
         combined.processedSegments += result.processedSegments
@@ -418,6 +477,11 @@ export class AppService {
   async providerMemoryAction(input: ProviderMemoryActionInput): Promise<ProviderMemory[]> {
     const memory = await this.repo.getProviderMemory(input.providerMemoryId)
     if (input.action === 'confirm') {
+      if (memory.scope.kind === 'provider')
+        throw new AppError(
+          'PROVIDER_MEMORY_SCOPE_REVIEW',
+          'Choose a MemoryBridge global, project, or conversation scope before confirming.'
+        )
       memory.state = 'active'
       memory.user_confirmed = true
     } else if (input.action === 'edit') {
@@ -430,6 +494,10 @@ export class AppService {
       memory.user_confirmed = false
     } else if (input.action === 'delete') {
       memory.state = 'deleted'
+      memory.user_confirmed = false
+    } else if (input.action === 'change_scope') {
+      memory.scope = input.scope
+      memory.state = 'needs_review'
       memory.user_confirmed = false
     } else {
       const replacement = await this.repo.getProviderMemory(input.replacementId)
@@ -492,12 +560,63 @@ export class AppService {
   async executeImport(token: string): Promise<ImportRecord> {
     const sourcePath = this.pendingImports.get(token)
     if (!sourcePath) throw new AppError('IMPORT_TOKEN_INVALID', 'Choose the import file again.')
-    this.pendingImports.delete(token)
-    return this.ingestion.import(sourcePath)
+    const controller = new AbortController()
+    this.importControllers.set(token, controller)
+    try {
+      return await this.ingestion.import(sourcePath, {
+        signal: controller.signal,
+        onProgress: (progress) =>
+          this.window?.webContents.send('import:progress', { token, ...progress })
+      })
+    } finally {
+      this.pendingImports.delete(token)
+      this.importControllers.delete(token)
+    }
+  }
+
+  cancelImport(token: string): void {
+    this.importControllers.get(token)?.abort()
   }
 
   async scanImportInbox(): Promise<ImportRecord[]> {
     return this.ingestion.scanInbox()
+  }
+
+  async listImportRecords(): Promise<ImportRecord[]> {
+    return this.repo.listImportRecords()
+  }
+
+  async validateImport(importId: string): Promise<ImportRecord> {
+    this.window?.webContents.send('import:progress', {
+      token: importId,
+      phase: 'validating',
+      processedBytes: 0,
+      totalBytes: 0,
+      completedConversations: 0,
+      totalConversations: 0
+    })
+    return this.repo.validateImport(importId)
+  }
+
+  async loadDemoArchive(): Promise<{
+    importRecord: ImportRecord
+    processing: ProcessingResult
+  }> {
+    const path = this.vault.path('imported', 'memorybridge-bundled-demo-chatgpt.zip')
+    await writeFile(path, bundledDemoArchive())
+    const token = 'bundled-demo'
+    const importRecord = await this.ingestion.import(path, {
+      onProgress: (progress) =>
+        this.window?.webContents.send('import:progress', { token, ...progress })
+    })
+    const validated = await this.repo.validateImport(importRecord.import_id)
+    const chats = (await this.repo.listChats()).filter(
+      (chat) => chat.import_origin === 'memorybridge-bundled-demo-chatgpt.zip'
+    )
+    const processing = await this.processChats('vault', this.vault.identity.vault_id, chats, {
+      force: true
+    })
+    return { importRecord: validated, processing }
   }
 
   listTopics(chatId?: string): TopicSegment[] {
@@ -534,8 +653,17 @@ export class AppService {
     })
     if (result.canceled || !result.filePath)
       throw new AppError('EXPORT_CANCELLED', 'Diagnostic export was cancelled.')
+    await atomicWriteJson(result.filePath, await this.diagnosticPayload())
+    return { path: result.filePath }
+  }
+
+  async getDiagnosticReport(): Promise<string> {
+    return JSON.stringify(await this.diagnosticPayload(), null, 2)
+  }
+
+  private async diagnosticPayload(): Promise<Record<string, unknown>> {
     const vaultStatus = await this.vault.status()
-    await atomicWriteJson(result.filePath, {
+    return {
       application: 'MemoryBridge',
       applicationVersion: app.getVersion(),
       exportedAt: new Date().toISOString(),
@@ -566,19 +694,42 @@ export class AppService {
         'credentials',
         'vault paths'
       ]
-    })
-    return { path: result.filePath }
+    }
   }
 
   async pollVaultStatus(): Promise<VaultStatus> {
-    const status = await this.vault.status()
+    let status = await this.vault.status()
+    if (!status.connected && this.repository) this.closeRepository()
+    const registered = this.settings.lastVaultPath
+      ? this.settings.registeredVaults.find((item) => item.path === this.settings.lastVaultPath)
+      : undefined
+    if (
+      !status.connected &&
+      registered &&
+      (await pathExists(join(registered.path, 'memorybridge.vault.json')))
+    ) {
+      try {
+        await this.vault.open(registered.path)
+        if (this.vault.identity.vault_id !== registered.vault_id) {
+          await this.vault.disconnect()
+        } else if ((await this.vault.status()).writable) {
+          await this.initializeRepository()
+        }
+        status = await this.vault.status()
+      } catch {
+        await this.vault.disconnect()
+      }
+    }
+    if (!status.connected && registered) {
+      status = { ...status, path: registered.path, reason: 'missing' }
+    }
     this.window?.webContents.send('vault:status', status)
     return status
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.closeRepository()
-    this.vault.disconnect()
+    await this.vault.disconnect()
   }
 
   private async initializeRepository(): Promise<void> {
@@ -586,6 +737,7 @@ export class AppService {
     await this.repository.initialize()
     this.memoryEngine = new MemoryEngine(this.repository)
     this.importService = new ImportService(this.vault, this.repository)
+    this.capacityService = new VaultCapacityService(this.vault, this.repository)
     const retrieval = new RetrievalEngine(this.repository)
     this.chatService = new ChatService(
       this.repository,
@@ -620,7 +772,12 @@ export class AppService {
     this.memoryEngine = null
     this.chatService = null
     this.importService = null
+    this.capacityController?.abort()
+    this.capacityController = null
+    this.capacityService = null
     this.pendingImports.clear()
+    for (const controller of this.importControllers.values()) controller.abort()
+    this.importControllers.clear()
     for (const controller of this.processingControllers.values()) controller.abort()
     this.processingControllers.clear()
   }
@@ -633,7 +790,20 @@ export class AppService {
       apiBaseUrl: this.settings.apiBaseUrl,
       apiKey,
       timeoutMs: this.settings.requestTimeoutMs,
-      maxRetries: this.settings.maxRetries
+      maxRetries: this.settings.maxRetries,
+      chatModel: this.settings.chatModel,
+      extractionModel: this.settings.extractionModel,
+      embeddingModel: this.settings.embeddingModel,
+      initialCapabilities: this.settings.providerCapabilities
+    })
+  }
+
+  private async persistProviderCapabilities(
+    capabilities: ReturnType<AIProvider['capabilities']>
+  ): Promise<void> {
+    this.settings = await this.config.update({
+      providerCapabilities: capabilities,
+      providerCapabilitiesUpdatedAt: new Date().toISOString()
     })
   }
 
@@ -668,6 +838,12 @@ export class AppService {
       throw new AppError('VAULT_DISCONNECTED', 'Connect a writable vault to import.', true)
     return this.importService
   }
+
+  private get capacity(): VaultCapacityService {
+    if (!this.capacityService)
+      throw new AppError('VAULT_DISCONNECTED', 'Connect a writable vault to inspect storage.', true)
+    return this.capacityService
+  }
 }
 
 function sameProviderScope(left: ProviderMemory, right: ProviderMemory): boolean {
@@ -677,5 +853,79 @@ function sameProviderScope(left: ProviderMemory, right: ProviderMemory): boolean
     return left.scope.project_id === right.scope.project_id
   if (left.scope.kind === 'conversation' && right.scope.kind === 'conversation')
     return left.scope.chat_id === right.scope.chat_id
+  if (left.scope.kind === 'provider' && right.scope.kind === 'provider')
+    return left.scope.level === right.scope.level && left.scope.reference === right.scope.reference
   return false
+}
+
+function bundledDemoArchive(): Uint8Array {
+  const conversation = (
+    id: string,
+    title: string,
+    userText: string,
+    assistantText: string,
+    timestamp: number
+  ): Record<string, unknown> => ({
+    id,
+    title,
+    create_time: timestamp,
+    current_node: `${id}-assistant`,
+    mapping: {
+      [`${id}-root`]: {
+        parent: null,
+        children: [`${id}-user`],
+        message: null
+      },
+      [`${id}-user`]: {
+        parent: `${id}-root`,
+        children: [`${id}-assistant`],
+        message: {
+          id: `${id}-user`,
+          author: { role: 'user' },
+          create_time: timestamp + 1,
+          content: { content_type: 'text', parts: [userText] },
+          status: 'finished_successfully',
+          metadata: {}
+        }
+      },
+      [`${id}-assistant`]: {
+        parent: `${id}-user`,
+        children: [],
+        message: {
+          id: `${id}-assistant`,
+          author: { role: 'assistant' },
+          create_time: timestamp + 2,
+          content: { content_type: 'text', parts: [assistantText] },
+          status: 'finished_successfully',
+          metadata: { model_slug: 'memorybridge-demo' }
+        }
+      }
+    }
+  })
+  const conversations = [
+    conversation(
+      'demo-storage',
+      'Storage decision',
+      'We decided to use internal storage by default and support external vaults.',
+      'Recorded. The earlier external-only option is no longer current.',
+      1_720_000_000
+    ),
+    conversation(
+      'demo-complete',
+      'Importer completion',
+      'We completed the safe ChatGPT ZIP importer and verified exact source evidence.',
+      'The completed importer is ready for internal testing.',
+      1_720_000_100
+    ),
+    conversation(
+      'demo-nepali',
+      'नेपाली परियोजना अवस्था',
+      'हामीले मेमोरीब्रिजको परीक्षण पूरा गर्‍यौँ र बाह्य ड्राइभ पुनः जडान गर्न बाँकी छ।',
+      'पूरा भएको काम र बाँकी प्रश्न छुट्टाछुट्टै सुरक्षित गरियो।',
+      1_720_000_200
+    )
+  ]
+  return zipSync({
+    'conversations.json': strToU8(JSON.stringify(conversations))
+  })
 }
