@@ -22,6 +22,12 @@ export function deterministicCandidates(
       const source = [message.messageId]
 
       if (isProposalOnly(lower)) continue
+      if (
+        /\b(?:have|has|had|did) not\s+(?:yet\s+)?(?:decided|agreed|confirmed|completed)\b/.test(
+          lower
+        )
+      )
+        continue
 
       if (/\bremember (?:that )?i prefer\b|\bi prefer\b|\bmy preference is\b/.test(lower)) {
         candidates.push(candidate('preference', sentence, source, 0.95, existing, true))
@@ -38,7 +44,10 @@ export function deterministicCandidates(
         continue
       }
 
-      if (/\bconsidered\b.+\b(?:decided|chose) not to\b/.test(lower)) {
+      if (
+        /\bconsidered\b.+\b(?:decided|chose) not to\b/.test(lower) ||
+        /\b(?:rejected|declined|ruled out)\b/.test(lower)
+      ) {
         candidates.push(candidate('rejected_option', sentence, source, 0.96, existing, true))
         continue
       }
@@ -68,8 +77,29 @@ export function deterministicCandidates(
         continue
       }
 
-      if (/\bno longer correct\b|\bpreviously\b.+\bnow\b|\bchanged from\b/.test(lower)) {
-        candidates.push(candidate('fact', sentence, source, 0.88, existing, true))
+      if (
+        /\bno longer (?:correct|valid|active)\b|\bpreviously\b.+\bnow\b|\bchanged from\b|\bcorrection\b/.test(
+          lower
+        )
+      ) {
+        candidates.push(candidate('correction', sentence, source, 0.88, existing, true))
+        continue
+      }
+
+      if (/\b(?:deadline|due(?: by| on)?|no later than)\b/.test(lower)) {
+        candidates.push(candidate('deadline', sentence, source, 0.9, existing, false))
+        continue
+      }
+
+      if (/\b(?:must|cannot|can't|limited to|at most|at least|budget cap)\b/.test(lower)) {
+        candidates.push(candidate('constraint', sentence, source, 0.88, existing, false))
+        continue
+      }
+
+      if (
+        /\b(?:file|document|spreadsheet|repository|repo|prototype|contract|report)\b/.test(lower)
+      ) {
+        candidates.push(candidate('artifact', sentence, source, 0.76, existing, false))
         continue
       }
 
@@ -134,12 +164,21 @@ function candidate(
 
 function isProposalOnly(lower: string): boolean {
   return (
-    /\b(?:could|might|maybe|may|what if|consider)\b/.test(lower) &&
-    !/\b(?:decided|confirmed|completed|submitted|agreed)\b/.test(lower)
+    /\b(?:could|might|maybe|may|possibly|what if|consider|only an idea)\b/.test(lower) &&
+    !/\b(?:decided|confirmed|agreed)\b/.test(lower)
   )
 }
 
 function isCompleted(lower: string): boolean {
+  if (
+    /\b(?:not|never|hardly)\b(?:\s+\w+){0,4}\s+\b(?:completed|submitted|delivered|implemented|finished|paid|resolved)\b/.test(
+      lower
+    ) ||
+    /\b(?:may|might|could|possibly)\b(?:\s+\w+){0,5}\s+\b(?:completed|submitted|delivered|implemented|finished|paid|resolved)\b/.test(
+      lower
+    )
+  )
+    return false
   return /\b(?:was|were|has been|have been|is now)?\s*(?:completed|submitted|delivered|implemented|finished|paid|resolved)\b/.test(
     lower
   )
@@ -154,7 +193,7 @@ function numbers(input: string): string {
 }
 
 function extractEntities(input: string): string[] {
-  const entities = input.match(/\b[A-Z][A-Za-z0-9-]{2,}\b/g) ?? []
+  const entities = input.match(/[\p{Lu}][\p{Letter}\p{Number}-]{2,}/gu) ?? []
   return [...new Set(entities)].slice(0, 12)
 }
 
@@ -167,11 +206,21 @@ function keywordSimilarity(left: string, right: string): number {
 }
 
 function deduplicateCandidates(candidates: MemoryCandidate[]): MemoryCandidate[] {
-  const seen = new Set<string>()
-  return candidates.filter((candidate) => {
+  const deduplicated = new Map<string, MemoryCandidate>()
+  for (const candidate of candidates) {
     const key = `${candidate.type}:${normalizeForComparison(candidate.statement)}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
+    const previous = deduplicated.get(key)
+    if (!previous) {
+      deduplicated.set(key, candidate)
+      continue
+    }
+    deduplicated.set(key, {
+      ...previous,
+      source_message_ids: [
+        ...new Set([...previous.source_message_ids, ...candidate.source_message_ids])
+      ],
+      confidence: Math.max(previous.confidence, candidate.confidence)
+    })
+  }
+  return [...deduplicated.values()]
 }

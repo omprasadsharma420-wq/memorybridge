@@ -6,6 +6,7 @@ import { registerIpc, unregisterIpc } from './ipc'
 let mainWindow: BrowserWindow | null = null
 let service: AppService | null = null
 let vaultPoller: NodeJS.Timeout | null = null
+const ownsApplicationLock = app.requestSingleInstanceLock()
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -43,29 +44,40 @@ function createWindow(): BrowserWindow {
   return window
 }
 
-void app.whenReady().then(async () => {
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) =>
-    callback(false)
-  )
-  session.defaultSession.setPermissionCheckHandler(() => false)
-  service = new AppService()
-  await service.initialize()
-  const e2eVault = process.env.MEMORYBRIDGE_E2E_VAULT
-  if (e2eVault && !(await service.bootstrap()).vault.connected) {
-    await service.createVault(e2eVault)
-  }
-  registerIpc(service)
-  mainWindow = createWindow()
-  service.setWindow(mainWindow)
-  vaultPoller = setInterval(() => void service?.pollVaultStatus(), 3_000)
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      mainWindow = createWindow()
-      service?.setWindow(mainWindow)
-    }
+if (!ownsApplicationLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
   })
-})
+
+  void app.whenReady().then(async () => {
+    session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) =>
+      callback(false)
+    )
+    session.defaultSession.setPermissionCheckHandler(() => false)
+    service = new AppService()
+    await service.initialize()
+    const e2eVault = process.env.MEMORYBRIDGE_E2E_VAULT
+    if (e2eVault && !(await service.bootstrap()).vault.connected) {
+      await service.createVault(e2eVault)
+    }
+    registerIpc(service)
+    mainWindow = createWindow()
+    service.setWindow(mainWindow)
+    vaultPoller = setInterval(() => void service?.pollVaultStatus(), 3_000)
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        mainWindow = createWindow()
+        service?.setWindow(mainWindow)
+      }
+    })
+  })
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()

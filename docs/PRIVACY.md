@@ -1,33 +1,26 @@
 # Privacy
 
-## What stays local
+MemoryBridge is local-first. It has no account, telemetry, analytics, advertising identifier, crash upload, hosted sync, or background provider account access.
 
-The selected vault stores projects, chats, original transcript snapshots, memories, extraction records, indexes, vectors, migration state, attachments added later, and derived project-memory references. MemoryBridge has no hosted backend, cloud database, mandatory account, analytics, telemetry, advertising, or silent conversation upload.
+## Stored locally
 
-Non-content application preferences and the last selected vault path live in Electron application data, outside the vault. This lets the app reconnect without creating a hidden content copy.
+The selected vault contains conversations, canonical metadata, extracted memory, evidence excerpts, topics, provider-memory records, imports, attachments metadata, prompts, logs, backups, and derived indexes. App-local data is limited to settings, registered vault IDs/paths, encrypted provider credentials, and content-free operational logs.
 
-## What may be sent to a provider
+Internal default locations and user-selected external folders use the same vault abstraction. Reconnect occurs only when a registered path still has the registered vault ID. A path alone is not trusted.
 
-- **Chat:** recent current-chat messages and only the retrieved cited context that fits the configured budget. Context can be a structured memory or, when none qualifies, an excerpt from a prior chat outside the current conversation.
-- **Extraction:** a limited recent message window and relevant active-memory metadata when extraction is enabled.
-- **Embeddings:** selected memory statements or the current retrieval query when semantic indexing is enabled.
+## Network use
 
-Mock mode performs all three operations deterministically without network access. Disabling extraction or embeddings never disables transcript saving or keyword search.
+- Mock mode performs no provider request.
+- In configured provider mode, the app sends the current bounded chat context and, when enabled, bounded extraction or embedding inputs to the chosen endpoint.
+- Imports never upload. ChatGPT ZIP and generic files are parsed locally.
+- MCP uses local child-process stdio and query-only local storage.
 
-## Credentials
+MemoryBridge does not scrape provider pages, reuse browser sessions, capture cookies, or call undocumented consumer APIs. Live sync is not claimed.
 
-An API key is encrypted through Electron `safeStorage` and stored in the operating-system application-data area, never in the vault. MemoryBridge never displays the complete stored key after saving. If OS encryption is unavailable, persistent key saving is refused. `.env` files and key material are Git-ignored.
+## Provider memory and diagnostics
 
-## Logging and diagnostics
+Imported provider memory is labeled, scoped, and stored separately for review; it is not silently treated as confirmed MemoryBridge memory. Diagnostic exports exclude vault paths, transcripts, message content, memory statements, evidence, credentials, and API keys.
 
-Structured logs contain event time/type, safe error category, provider/model identifiers, chat/message IDs, durations, and retry counts where applicable. They do not contain prompts, responses, memory statements, authorization headers, credentials, transcript contents, personal files, or vault file contents.
+## Deletion and portability
 
-The diagnostic export includes application/runtime versions, provider/model names, feature toggles, vault connected/writable/schema status, whether a key exists, and a bounded list of the same safe recent event metadata. It deliberately excludes content, secrets, and the vault path.
-
-## Deletion
-
-To delete conversation data, close MemoryBridge and delete the user-selected vault folder. This is a user-controlled destructive action and is not performed by the app. Clear the saved API key separately in Settings if desired. Back up or securely erase removable media according to your own threat model.
-
-## Disconnected drives
-
-If the selected drive/folder disappears or becomes read-only, MemoryBridge shows a prominent disconnected state, blocks new messages and provider calls, and offers **Locate vault**. It does not save a fallback transcript elsewhere. Existing non-content interface settings may remain available. Reconnection validates the immutable manifest and rebuilds the derived projection when requested.
+The vault is ordinary user-controlled data. Memory actions retain lifecycle provenance unless the user deletes records; raw imported source files move only within the vault inbox workflow. To remove all content, close MemoryBridge and delete the chosen vault through the operating system. Keep a copy if recovery is desired.

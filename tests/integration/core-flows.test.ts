@@ -46,6 +46,7 @@ describe('MemoryBridge core flows', () => {
       const results = harness.repository.search({
         query: 'Electron',
         memoryType: 'decision',
+        allProjects: true,
         includeHistory: false,
         limit: 10
       })
@@ -57,6 +58,7 @@ describe('MemoryBridge core flows', () => {
         harness.repository.search({
           query: 'Electron',
           memoryType: 'decision',
+          allProjects: true,
           fromDate: '2999-01-01',
           includeHistory: false,
           limit: 10
@@ -99,7 +101,7 @@ describe('MemoryBridge core flows', () => {
       )
       expect(memories.find((memory) => memory.statement.includes('1,000'))?.state).toBe('active')
       const current = harness.repository
-        .search({ query: 'initial batch', includeHistory: false, limit: 10 })
+        .search({ query: 'initial batch', chatId: chat.chat_id, includeHistory: false, limit: 10 })
         .filter((result) => result.kind === 'memory')
       expect(current).toHaveLength(1)
       expect(current[0]?.excerpt).toContain('1,000')

@@ -118,10 +118,11 @@ export class ChatService {
         status: 'streaming',
         updated_at: new Date().toISOString()
       }
-      await this.repository.appendMessage(assistantMessage)
+      await this.repository.appendMessagePatch(assistantMessage)
       for await (const chunk of provider.streamChat({
         model: settings.chatModel,
         messages: requestMessages,
+        maxOutputTokens: settings.outputTokenBudget,
         signal: controller.signal
       })) {
         assistantMessage = {
@@ -136,7 +137,10 @@ export class ChatService {
           assistantMessage.content.length - lastCheckpointLength >= 192 ||
           Date.now() - lastCheckpointAt >= 500
         ) {
-          await this.repository.appendMessage(assistantMessage)
+          await this.repository.appendMessagePatch(
+            assistantMessage,
+            assistantMessage.content.slice(lastCheckpointLength)
+          )
           lastCheckpointLength = assistantMessage.content.length
           lastCheckpointAt = Date.now()
         }
@@ -154,7 +158,10 @@ export class ChatService {
       updated_at: new Date().toISOString(),
       ...(errorCategory ? { error_category: errorCategory } : {})
     }
-    await this.repository.appendMessage(assistantMessage)
+    await this.repository.appendMessagePatch(
+      assistantMessage,
+      assistantMessage.content.slice(lastCheckpointLength)
+    )
     this.onStream(assistantMessage)
 
     let memories: Memory[] = []
@@ -171,10 +178,25 @@ export class ChatService {
   ): Promise<ProviderMessage[]> {
     const history = await this.repository.readMessages(chatId)
     const throughIndex = history.findIndex((message) => message.message_id === throughUserMessageId)
-    const bounded = history
-      .slice(Math.max(0, throughIndex - 19), throughIndex + 1)
+    const eligible = history
+      .slice(0, throughIndex + 1)
       .filter((message) => message.status === 'complete' && message.role !== 'system')
-      .map((message) => ({ role: message.role as 'user' | 'assistant', content: message.content }))
+    const selected: typeof eligible = []
+    let used = 0
+    for (let index = eligible.length - 1; index >= 0; index -= 1) {
+      const message = eligible[index]!
+      if (
+        selected.length > 0 &&
+        used + message.content.length > this.getSettings().recentChatCharacterBudget
+      )
+        break
+      selected.push(message)
+      used += message.content.length
+    }
+    const bounded = selected.reverse().map((message) => ({
+      role: message.role as 'user' | 'assistant',
+      content: message.content
+    }))
     if (context.length === 0) return bounded
     const contextText = context
       .map(

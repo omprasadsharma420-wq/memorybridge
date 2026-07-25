@@ -5,7 +5,16 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
-    build: { sourcemap: true }
+    build: {
+      sourcemap: true,
+      rollupOptions: {
+        input: {
+          index: resolve('src/main/index.ts'),
+          'mcp-server': resolve('src/main/mcp-server.ts')
+        },
+        output: { entryFileNames: '[name].js' }
+      }
+    }
   },
   preload: {
     plugins: [externalizeDepsPlugin()],

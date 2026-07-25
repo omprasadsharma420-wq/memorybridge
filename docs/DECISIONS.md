@@ -1,5 +1,29 @@
 # Architectural decisions
 
+## ADR-011: Production center is universal local memory
+
+Accepted 2026-07-22. Native chat remains supported, but canonical ingestion, evidence-backed reconciliation, hybrid cited retrieval, provider-memory preservation, and MCP define the product center.
+
+## ADR-012: Explicit scope and evidence are mandatory
+
+Accepted 2026-07-22. Global/project/conversation scope and first-class multi-chat evidence are shared invariants across extraction, relationships, search, retrieval, UI, and MCP. Null project no longer means unrestricted.
+
+## ADR-013: Delta streaming supersedes cumulative snapshots
+
+Accepted 2026-07-22. ADR-006's cumulative full-message streaming checkpoints are superseded because they grow quadratically. One initial message plus append-only content/status deltas preserves crash recovery with linear growth.
+
+## ADR-014: Incremental startup and derived migrations
+
+Accepted 2026-07-22. Normal startup does not rebuild. New/corrupt/mismatched/upgraded indexes rebuild from authoritative files. Vault v1 migration backs up the manifest before v2.
+
+## ADR-015: Honest connector/provider capabilities
+
+Accepted 2026-07-22. Capabilities are independently declared or discovered. Branding and an OpenAI-shaped URL never imply structured output, embeddings, model listing, live sync, or export access.
+
+## ADR-016: MCP is local bounded retrieval
+
+Accepted 2026-07-22. MCP uses child-process stdio and query-only storage with named, limited, cited tools. No generic filesystem or full-vault dump is exposed.
+
 ## ADR-001: Isolated nested repository
 
 **Decision:** Build in `memorybridge/` with its own Git repository.  

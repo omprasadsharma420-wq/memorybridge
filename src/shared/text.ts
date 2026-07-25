@@ -56,8 +56,9 @@ export function sanitizeFilename(input: string, fallback = 'untitled', maxLength
 export function slugify(input: string, fallback = 'untitled'): string {
   const words = sanitizeFilename(input, fallback, 100)
     .toLowerCase()
+    .normalize('NFKC')
     .replace(/['’]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
     .replace(/^-+|-+$/g, '')
   return (words || fallback).slice(0, 72)
 }
@@ -78,8 +79,12 @@ export function deterministicTitle(input: string, maxLength = 64): string {
 
 export function normalizeForComparison(input: string): string {
   return normalizeWhitespace(input)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/[^\p{Letter}\p{Number}\p{Mark}\s_-]/gu, ' ')
+    .replace(/[\s_-]+/g, ' ')
+    .trim()
 }
 
 export function keywords(input: string): Set<string> {
