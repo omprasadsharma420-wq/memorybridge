@@ -1,5 +1,5 @@
+import { randomUUID } from 'node:crypto'
 import { copyFile, open, readFile, readdir, rm, statfs } from 'node:fs/promises'
-import { rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { hostname } from 'node:os'
 import { BRAND } from '../../shared/brand'
@@ -39,6 +39,7 @@ const VAULT_DIRECTORIES = [
 
 const LOCK_FILE = '.memorybridge.lock.json'
 const LOCK_STALE_MS = 45_000
+const HEARTBEAT_INTERVAL_MS = 15_000
 
 interface VaultLock {
   vault_id: string
@@ -47,6 +48,7 @@ interface VaultLock {
   application_version: string
   acquired_at: string
   heartbeat_at: string
+  ownership_token: string
 }
 
 export class VaultManager {
@@ -54,6 +56,16 @@ export class VaultManager {
   private manifest: VaultManifest | null = null
   private readOnly = false
   private heartbeat: NodeJS.Timeout | null = null
+  private heartbeatQueue: Promise<void> = Promise.resolve()
+  private ownershipToken: string | null = null
+  private heartbeatError: string | null = null
+
+  constructor(
+    private readonly timing: {
+      heartbeatIntervalMs?: number
+      lockStaleMs?: number
+    } = {}
+  ) {}
 
   get root(): string {
     if (!this.rootPath || !this.manifest) {
@@ -127,7 +139,11 @@ export class VaultManager {
     try {
       await this.acquireLock()
     } catch (error) {
-      if (!allowReadOnlyOnConflict) {
+      if (
+        !allowReadOnlyOnConflict ||
+        !(error instanceof AppError) ||
+        error.code !== 'VAULT_LOCKED'
+      ) {
         this.rootPath = null
         this.manifest = null
         throw error
@@ -137,13 +153,23 @@ export class VaultManager {
     return this.status()
   }
 
-  disconnect(): void {
+  async disconnect(): Promise<void> {
     if (this.heartbeat) clearInterval(this.heartbeat)
     this.heartbeat = null
-    if (this.rootPath && !this.readOnly) rmSync(join(this.rootPath, LOCK_FILE), { force: true })
+    const rootPath = this.rootPath
+    const ownershipToken = this.ownershipToken
+    this.ownershipToken = null
+    await this.heartbeatQueue.catch(() => undefined)
+    if (rootPath && ownershipToken && !this.readOnly) {
+      const lockPath = join(rootPath, LOCK_FILE)
+      const lock = await this.readLock(lockPath)
+      if (lock?.ownership_token === ownershipToken) await rm(lockPath, { force: true })
+    }
     this.rootPath = null
     this.manifest = null
     this.readOnly = false
+    this.heartbeatError = null
+    this.heartbeatQueue = Promise.resolve()
   }
 
   path(...parts: string[]): string {
@@ -156,7 +182,7 @@ export class VaultManager {
     }
     const manifestPath = join(this.rootPath, BRAND.vaultManifest)
     if (!(await pathExists(manifestPath))) {
-      this.disconnect()
+      await this.disconnect()
       throw new AppError(
         'VAULT_DISCONNECTED',
         'The memory vault is unavailable. Locate it to continue.',
@@ -181,7 +207,7 @@ export class VaultManager {
     }
     if (!(await pathExists(join(this.rootPath, BRAND.vaultManifest)))) {
       const path = this.rootPath
-      this.disconnect()
+      await this.disconnect()
       return {
         connected: false,
         path,
@@ -192,7 +218,7 @@ export class VaultManager {
       }
     }
     const writable = !this.readOnly && (await isWritableDirectory(this.rootPath))
-    let freeBytes: number | null = null
+    let freeBytes: number | null
     try {
       const filesystem = await statfs(this.rootPath, { bigint: true })
       const free = filesystem.bavail * filesystem.bsize
@@ -206,20 +232,26 @@ export class VaultManager {
       writable,
       freeBytes,
       manifest: this.manifest,
-      reason: writable ? undefined : 'read-only'
+      reason: writable ? undefined : this.readOnly ? 'locked' : 'read-only',
+      heartbeatHealthy: this.heartbeatError === null,
+      lockMessage: this.readOnly
+        ? 'Locked by another MemoryBridge instance. Close it, then retry.'
+        : this.heartbeatError
     }
   }
 
   private async acquireLock(): Promise<void> {
     const lockPath = join(this.root, LOCK_FILE)
     const now = new Date().toISOString()
+    const ownershipToken = randomUUID()
     const lock: VaultLock = {
       vault_id: this.identity.vault_id,
       pid: process.pid,
       machine_id: hostname(),
       application_version: BRAND.applicationVersion,
       acquired_at: now,
-      heartbeat_at: now
+      heartbeat_at: now,
+      ownership_token: ownershipToken
     }
     try {
       const handle = await open(lockPath, 'wx')
@@ -243,16 +275,20 @@ export class VaultManager {
       await handle.close()
     }
     this.readOnly = false
+    this.ownershipToken = ownershipToken
+    this.heartbeatError = null
     this.heartbeat = setInterval(() => {
-      void atomicWriteJson(lockPath, { ...lock, heartbeat_at: new Date().toISOString() })
-    }, 15_000)
+      this.queueHeartbeat(lockPath, lock)
+    }, this.timing.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS)
     this.heartbeat.unref()
   }
 
   private async readLock(path: string): Promise<VaultLock | null> {
     try {
       const value = JSON.parse(await readFile(path, 'utf8')) as Partial<VaultLock>
-      return typeof value.pid === 'number' && typeof value.heartbeat_at === 'string'
+      return typeof value.pid === 'number' &&
+        typeof value.heartbeat_at === 'string' &&
+        typeof value.ownership_token === 'string'
         ? (value as VaultLock)
         : null
     } catch {
@@ -262,7 +298,8 @@ export class VaultManager {
 
   private isStale(lock: VaultLock | null): boolean {
     if (!lock) return true
-    if (Date.now() - Date.parse(lock.heartbeat_at) > LOCK_STALE_MS) return true
+    if (Date.now() - Date.parse(lock.heartbeat_at) > (this.timing.lockStaleMs ?? LOCK_STALE_MS))
+      return true
     if (lock.machine_id !== hostname()) return false
     try {
       process.kill(lock.pid, 0)
@@ -270,5 +307,30 @@ export class VaultManager {
     } catch {
       return true
     }
+  }
+
+  private queueHeartbeat(lockPath: string, lock: VaultLock): void {
+    const ownershipToken = lock.ownership_token
+    this.heartbeatQueue = this.heartbeatQueue
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.ownershipToken !== ownershipToken) return
+        const current = await this.readLock(lockPath)
+        if (!current || current.ownership_token !== ownershipToken) {
+          if (this.heartbeat) clearInterval(this.heartbeat)
+          this.heartbeat = null
+          this.heartbeatError = 'Vault lock ownership was lost. Reconnect the vault.'
+          return
+        }
+        await atomicWriteJson(lockPath, {
+          ...lock,
+          heartbeat_at: new Date().toISOString()
+        })
+        this.heartbeatError = null
+      })
+      .catch(() => {
+        this.heartbeatError =
+          'The vault heartbeat could not be written. Check that the drive is connected.'
+      })
   }
 }

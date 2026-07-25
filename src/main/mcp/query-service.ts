@@ -9,6 +9,9 @@ export interface McpScope {
   projectId?: string
   chatId?: string
   allProjects?: boolean
+  includeNeedsReview?: boolean
+  includeDisputed?: boolean
+  includeHistorical?: boolean
 }
 
 export class McpQueryService {
@@ -47,32 +50,34 @@ export class McpQueryService {
     const terms = toFtsQuery(query)
     if (!terms) return []
     const visible = scopeSql('m', scope)
+    const lifecycle = lifecycleSql('m', scope)
     return (
       this.database
         .prepare(
           `SELECT m.*, c.title, bm25(memories_fts) AS rank
            FROM memories_fts JOIN memories m ON m.memory_id = memories_fts.memory_id
            JOIN chats c ON c.chat_id = m.chat_id
-           WHERE memories_fts MATCH ? AND m.state NOT IN ('superseded','rejected','deleted')
+           WHERE memories_fts MATCH ? AND ${lifecycle.sql}
              ${visible.sql}
            ORDER BY m.pinned DESC, m.user_confirmed DESC, rank LIMIT ?`
         )
         .all(terms, ...visible.values, boundedLimit(limit)) as Array<Record<string, unknown>>
-    ).map((row) => this.citedMemory(row))
+    ).map((row) => this.citedMemory(row, scope))
   }
 
   getMemoriesByType(types: string[], scope: McpScope = {}, limit = 20): unknown[] {
     const visible = scopeSql('m', scope)
+    const lifecycle = lifecycleSql('m', scope)
     const placeholders = types.map(() => '?').join(',')
     return (
       this.database
         .prepare(
           `SELECT m.*, c.title FROM memories m JOIN chats c ON c.chat_id = m.chat_id
-           WHERE m.type IN (${placeholders}) AND m.state NOT IN ('superseded','rejected','deleted')
+           WHERE m.type IN (${placeholders}) AND ${lifecycle.sql}
            ${visible.sql} ORDER BY m.pinned DESC, m.user_confirmed DESC, m.updated_at DESC LIMIT ?`
         )
         .all(...types, ...visible.values, boundedLimit(limit)) as Array<Record<string, unknown>>
-    ).map((row) => this.citedMemory(row))
+    ).map((row) => this.citedMemory(row, scope))
   }
 
   findRelatedConversations(query: string, scope: McpScope = {}, limit = 10): unknown[] {
@@ -109,7 +114,8 @@ export class McpQueryService {
     }))
   }
 
-  getChatExcerpt(chatId: string, afterSequence = -1, limit = 20): unknown[] {
+  getChatExcerpt(chatId: string, scope: McpScope, afterSequence = -1, limit = 20): unknown[] {
+    if (!this.canAccessChat(chatId, scope)) return []
     return (
       this.database
         .prepare(
@@ -130,7 +136,9 @@ export class McpQueryService {
     }))
   }
 
-  getMemoryEvidence(memoryId: string, limit = 20): unknown[] {
+  getMemoryEvidence(memoryId: string, scope: McpScope, limit = 20): unknown[] {
+    const visible = scopeSql('m', scope)
+    const lifecycle = lifecycleSql('m', scope)
     return (
       this.database
         .prepare(
@@ -138,9 +146,11 @@ export class McpQueryService {
                   e.segment_id, e.evidence_role, e.created_at,
                   EXISTS(SELECT 1 FROM messages m WHERE m.message_id = e.message_id
                          AND m.chat_id = e.chat_id) AS source_available
-           FROM memory_evidence e WHERE e.memory_id = ? ORDER BY e.created_at LIMIT ?`
+           FROM memory_evidence e JOIN memories m ON m.memory_id = e.memory_id
+           WHERE e.memory_id = ? AND ${lifecycle.sql} ${visible.sql}
+           ORDER BY e.created_at LIMIT ?`
         )
-        .all(memoryId, boundedLimit(limit)) as Array<Record<string, unknown>>
+        .all(memoryId, ...visible.values, boundedLimit(limit)) as Array<Record<string, unknown>>
     ).map((row) => ({
       evidenceId: String(row.evidence_id),
       chatId: String(row.chat_id),
@@ -189,7 +199,7 @@ export class McpQueryService {
       .all(...values)
   }
 
-  private citedMemory(row: Record<string, unknown>): Record<string, unknown> {
+  private citedMemory(row: Record<string, unknown>, scope: McpScope): Record<string, unknown> {
     const memoryId = String(row.memory_id)
     const scopeKind = String(row.scope_kind ?? (row.project_id ? 'project' : 'conversation'))
     return {
@@ -210,9 +220,20 @@ export class McpQueryService {
       updatedAt: String(row.updated_at),
       supersedes: parseArray(row.supersedes),
       supersededBy: row.superseded_by ? String(row.superseded_by) : null,
-      evidence: this.getMemoryEvidence(memoryId, 5),
+      evidence: this.getMemoryEvidence(memoryId, scope, 5),
       citation: `memorybridge://chat/${String(row.chat_id)}/memory/${memoryId}`
     }
+  }
+
+  private canAccessChat(chatId: string, scope: McpScope): boolean {
+    if (scope.allProjects) return true
+    if (scope.chatId && scope.chatId !== chatId) return false
+    if (scope.chatId && !scope.projectId) return true
+    if (!scope.projectId) return false
+    const row = this.database
+      .prepare('SELECT 1 AS allowed FROM chats WHERE chat_id = ? AND project_id = ?')
+      .get(chatId, scope.projectId) as { allowed?: number } | undefined
+    return Boolean(row?.allowed)
   }
 }
 
@@ -221,8 +242,14 @@ function scopeSql(alias: string, scope: McpScope): { sql: string; values: string
   const global = `(${alias}.scope_kind = 'global' AND ${alias}.state = 'confirmed' AND ${alias}.user_confirmed = 1 AND ${alias}.confirmation_source != 'none')`
   if (scope.projectId && scope.chatId) {
     return {
-      sql: `AND (${global} OR (${alias}.scope_kind = 'project' AND ${alias}.scope_id = ?) OR (${alias}.scope_kind = 'conversation' AND ${alias}.scope_id = ?))`,
-      values: [scope.projectId, scope.chatId]
+      sql: `AND (${global}
+        OR (${alias}.scope_kind = 'project' AND ${alias}.scope_id = ?)
+        OR (${alias}.scope_kind = 'conversation' AND ${alias}.scope_id = ?
+            AND EXISTS (
+              SELECT 1 FROM chats scope_chat
+              WHERE scope_chat.chat_id = ? AND scope_chat.project_id = ?
+            )))`,
+      values: [scope.projectId, scope.chatId, scope.chatId, scope.projectId]
     }
   }
   if (scope.projectId)
@@ -236,6 +263,16 @@ function scopeSql(alias: string, scope: McpScope): { sql: string; values: string
       values: [scope.chatId]
     }
   return { sql: `AND ${global}`, values: [] }
+}
+
+function lifecycleSql(alias: string, scope: McpScope): { sql: string } {
+  const accepted = ['active', 'confirmed', 'completed']
+  if (scope.includeNeedsReview) accepted.push('needs_review', 'candidate')
+  if (scope.includeDisputed) accepted.push('disputed')
+  if (scope.includeHistorical) accepted.push('superseded', 'rejected')
+  return {
+    sql: `${alias}.state IN (${accepted.map((state) => `'${state}'`).join(',')})`
+  }
 }
 
 function boundedLimit(value: number): number {

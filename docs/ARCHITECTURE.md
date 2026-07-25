@@ -28,9 +28,22 @@ External AI client -> local stdio MCP server -> query-only SQLite index
 
 ## Storage lifecycle
 
-The app requests an Electron single-instance lock. A writable vault also owns `.memorybridge.lock.json` with vault ID, PID, machine, app version, acquisition time, and 15-second heartbeat. Live conflicts are read-only; stale locks recover conservatively.
+The app requests an Electron single-instance lock. A writable vault also owns
+`.memorybridge.lock.json` with vault ID, PID, machine, app version, acquisition time, ownership
+token, and a serialized 15-second heartbeat. Live conflicts show a locked screen; no readable
+repository is claimed. Heartbeat failure is contained and visible, shutdown stops/flushes the
+heartbeat before removing only the matching owned lock, and stale locks recover conservatively.
 
 Normal startup opens and migrates the index, validates its vault identity, and recovers indexed nonterminal messages. It rebuilds only for a new, corrupt, mismatched, or upgraded derived index. Raw transcripts, memories, evidence, topics, import records, and provider memories remain authoritative.
+
+A performed v0.1 provenance migration also forces one derived rebuild. Full rebuilds insert raw
+rows in one transaction and populate FTS tables in bulk; ordinary edits continue to update FTS
+incrementally. A registered missing external vault stays visibly disconnected, and the poller
+reopens it only when the manifest returns with the registered vault ID.
+
+Capacity scanning uses metadata only, skips symbolic links, checks every candidate remains inside
+the vault, yields periodically, supports cancellation, and caches only a completed snapshot until
+refresh.
 
 Streaming writes one complete initial message followed by content deltas/status patches. Reads replay the latest state. Memory writes touch only affected chat files and project projections.
 

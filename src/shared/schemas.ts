@@ -249,9 +249,18 @@ export const topicSegmentSchema = z.object({
 export const importRecordSchema = z.object({
   import_id: importIdSchema,
   connector_id: z.string().min(1).max(120),
+  connector_version: z.string().min(1).max(120).default('unknown'),
   source_path: z.string().max(2000),
   archive_hash: z.string().max(128),
-  status: z.enum(['previewed', 'running', 'complete', 'partial', 'failed', 'unchanged']),
+  status: z.enum([
+    'previewed',
+    'running',
+    'complete',
+    'partial',
+    'failed',
+    'unchanged',
+    'cancelled'
+  ]),
   started_at: isoDate,
   completed_at: isoDate.nullable().default(null),
   conversation_count: z.number().int().nonnegative().default(0),
@@ -261,6 +270,12 @@ export const importRecordSchema = z.object({
   skipped_count: z.number().int().nonnegative().default(0),
   error_count: z.number().int().nonnegative().default(0),
   review_count: z.number().int().nonnegative().default(0),
+  discovered_count: z.number().int().nonnegative().default(0),
+  branches_handled: z.number().int().nonnegative().default(0),
+  malformed_count: z.number().int().nonnegative().default(0),
+  skipped_entry_count: z.number().int().nonnegative().default(0),
+  validation_status: z.enum(['not_run', 'passed', 'warnings', 'failed']).default('not_run'),
+  validation_issues: z.array(z.string().max(1000)).max(100).default([]),
   checkpoint: z.record(z.string(), z.unknown()).default({}),
   error_category: z.string().max(120).nullable().default(null),
   error_messages: z.array(z.string().max(1000)).max(100).default([])
@@ -287,7 +302,14 @@ export const providerMemorySchema = z.object({
   source_type: providerMemorySourceTypeSchema.default('provider_saved_memory'),
   statement: z.string().min(1).max(4000),
   source_label: z.string().min(1).max(500),
-  scope: memoryScopeSchema,
+  scope: z.union([
+    memoryScopeSchema,
+    z.object({
+      kind: z.literal('provider'),
+      level: z.enum(['project', 'workspace', 'conversation', 'unknown']),
+      reference: z.string().max(500).nullable().default(null)
+    })
+  ]),
   state: providerMemoryStateSchema.default('needs_review'),
   user_confirmed: z.boolean().default(false),
   imported_at: isoDate,
@@ -328,6 +350,28 @@ export const appSettingsSchema = z.object({
   chatModel: z.string().min(1).default('gpt-4.1-mini'),
   extractionModel: z.string().min(1).default('gpt-4.1-mini'),
   embeddingModel: z.string().min(1).default('text-embedding-3-small'),
+  providerCapabilities: z
+    .object({
+      authentication: z.boolean(),
+      chat: z.boolean(),
+      streaming: z.boolean(),
+      structuredOutput: z.boolean(),
+      embeddings: z.boolean(),
+      modelListing: z.boolean(),
+      cancellation: z.boolean()
+    })
+    .default({
+      authentication: false,
+      chat: false,
+      streaming: false,
+      structuredOutput: false,
+      embeddings: false,
+      modelListing: false,
+      cancellation: true
+    }),
+  providerCapabilitiesUpdatedAt: isoDate.nullable().default(null),
+  onboardingCompleted: z.boolean().default(false),
+  processingMode: z.enum(['offline', 'ai', 'demo']).default('demo'),
   requestTimeoutMs: z.number().int().min(1000).max(300000).default(60000),
   maxRetries: z.number().int().min(0).max(5).default(2),
   mockMode: z.boolean().default(true),

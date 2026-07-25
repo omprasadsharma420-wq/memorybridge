@@ -2,5 +2,5 @@ export const BRAND = {
   name: 'MemoryBridge',
   vaultManifest: 'memorybridge.vault.json',
   protocolVersion: 2,
-  applicationVersion: '0.2.0'
+  applicationVersion: '0.2.1'
 } as const

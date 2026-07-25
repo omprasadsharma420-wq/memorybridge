@@ -25,4 +25,15 @@ Development command after `npm run build`:
 node out/main/mcp-server.js --vault "C:\path\to\vault"
 ```
 
+Automated local smoke command after `npm run build`:
+
+```powershell
+npm run mcp:smoke -- --self-test
+npm run mcp:smoke -- "C:\path\to\vault"
+```
+
+`--self-test` creates and removes a synthetic minimal vault, starts the real built stdio entry,
+requires exactly ten tools, calls `list_projects`, and prints JSON. Passing a vault path performs the
+same transport check against that vault without modifying it.
+
 The implementation follows the stable TypeScript SDK stdio server pattern documented by the [Model Context Protocol SDK](https://ts.sdk.modelcontextprotocol.io/server).

@@ -1,5 +1,9 @@
 # Repository audit
 
+Historical note: this document records the original production-pivot audit. The current 0.2.1
+stabilization audit, defect list, and release gate are in `MVP_STABILIZATION_PLAN.md`,
+`SMOKE_TEST_RESULTS.md`, and `STATUS.md`.
+
 Audit date: 2026-07-22. Branch: `codex/memorybridge-production-pivot`.
 
 ## Baseline verification

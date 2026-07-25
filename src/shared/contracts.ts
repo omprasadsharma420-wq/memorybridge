@@ -28,7 +28,9 @@ export interface VaultStatus {
   writable: boolean
   freeBytes: number | null
   manifest: VaultManifest | null
-  reason?: 'not-selected' | 'missing' | 'invalid' | 'read-only'
+  reason?: 'not-selected' | 'missing' | 'invalid' | 'read-only' | 'locked'
+  heartbeatHealthy?: boolean
+  lockMessage?: string | null
 }
 
 export interface SearchResult {
@@ -70,6 +72,7 @@ export interface ChatTurnResult {
 }
 
 export interface BootstrapState {
+  applicationVersion: string
   vault: VaultStatus
   settings: AppSettings
   hasStoredApiKey: boolean
@@ -109,6 +112,7 @@ export interface ProviderConnectionResult {
   ok: boolean
   message: string
   capabilities: {
+    authentication: boolean
     chat: boolean
     streaming: boolean
     structuredOutput: boolean
@@ -139,7 +143,59 @@ export interface ProcessingResult {
   memories: Memory[]
 }
 
+export interface ImportProgressView {
+  token: string
+  phase: 'reading' | 'decompressing' | 'parsing' | 'persisting' | 'validating' | 'complete'
+  processedBytes: number
+  totalBytes: number
+  completedConversations: number
+  totalConversations: number
+}
+
+export interface StorageProgress {
+  status: 'running' | 'complete' | 'cancelled' | 'failed'
+  scannedFiles: number
+  scannedBytes: number
+}
+
+export interface VaultStorageStats {
+  vaultName: string
+  vaultId: string
+  path: string
+  connectionStatus: 'connected' | 'disconnected'
+  writeStatus: 'writable' | 'read-only' | 'locked'
+  storageType: 'internal' | 'removable' | 'unknown'
+  volumeName: string | null
+  filesystem: string | null
+  totalDeviceBytes: number | null
+  freeDeviceBytes: number | null
+  usedDeviceBytes: number | null
+  totalVaultBytes: number
+  transcriptBytes: number
+  indexBytes: number
+  structuredMemoryBytes: number
+  evidenceBytes: number
+  embeddingBytes: number
+  attachmentBytes: number
+  importArchiveBytes: number
+  projects: number
+  chats: number
+  messages: number
+  memories: number
+  calculatedAt: string
+  scannedFiles: number
+  warnings: string[]
+}
+
+export interface DemoLoadResult {
+  importRecord: ImportRecord
+  processing: ProcessingResult
+}
+
 export const importTokenInputSchema = z.object({ token: z.uuid() })
+export const importOnlyInputSchema = z.object({
+  importId: z.string().regex(/^import_[a-f0-9-]{16,}$/)
+})
 export type ImportTokenInput = z.infer<typeof importTokenInputSchema>
 
 export const createProjectInputSchema = z.object({
@@ -232,12 +288,29 @@ export const providerMemoryActionInputSchema = z.discriminatedUnion('action', [
     providerMemoryId: providerMemoryIdSchema,
     action: z.literal('supersede'),
     replacementId: providerMemoryIdSchema
+  }),
+  z.object({
+    providerMemoryId: providerMemoryIdSchema,
+    action: z.literal('change_scope'),
+    scope: memoryScopeSchema
   })
 ])
 export const topicOnlyInputSchema = z.object({ topicId: topicIdSchema })
 export const projectOnlyInputSchema = z.object({ projectId: projectIdSchema })
 export const processingCancelInputSchema = z.object({ scopeId: z.string().min(1).max(500) })
+export const storageStatsInputSchema = z.object({ refresh: z.boolean().default(false) })
 export const apiKeyInputSchema = z.object({ apiKey: z.string().trim().min(8).max(1000) })
+export const providerCapabilityInputSchema = z.object({
+  capability: z.enum([
+    'authentication',
+    'chat',
+    'streaming',
+    'structuredOutput',
+    'embeddings',
+    'modelListing',
+    'cancellation'
+  ])
+})
 export const settingsInputSchema = settingsPatchSchema
 
 export type CreateProjectInput = z.infer<typeof createProjectInputSchema>
@@ -271,24 +344,38 @@ export interface MemoryBridgeApi {
   saveApiKey(apiKey: string): Promise<void>
   clearApiKey(): Promise<void>
   testConnection(): Promise<ProviderConnectionResult>
+  testProviderCapability(
+    capability: z.infer<typeof providerCapabilityInputSchema>['capability']
+  ): Promise<ProviderConnectionResult>
   rebuildIndex(): Promise<{ projects: number; chats: number; messages: number; memories: number }>
+  getVaultStorage(refresh?: boolean): Promise<VaultStorageStats>
+  cancelVaultStorage(): Promise<void>
+  verifyVaultLocation(): Promise<{ ok: true; checkedAt: string }>
   rerunExtraction(chatId: string): Promise<Memory[]>
   reprocessSegment(topicId: string): Promise<ProcessingResult>
   reprocessChat(chatId: string): Promise<ProcessingResult>
   reprocessProject(projectId: string): Promise<ProcessingResult>
   reprocessVault(): Promise<ProcessingResult>
+  rebuildVaultIntelligence(): Promise<ProcessingResult>
   cancelReprocessing(scopeId: string): Promise<void>
   listConnectors(): Promise<ConnectorCapabilitiesView[]>
   chooseImport(): Promise<ImportPreviewResult | null>
   executeImport(input: ImportTokenInput): Promise<ImportRecord>
+  cancelImport(token: string): Promise<void>
   scanImportInbox(): Promise<ImportRecord[]>
+  listImportRecords(): Promise<ImportRecord[]>
+  validateImport(importId: string): Promise<ImportRecord>
+  loadDemoArchive(): Promise<DemoLoadResult>
   listTopics(chatId?: string): Promise<TopicSegment[]>
   listEvidence(memoryId?: string): Promise<MemoryEvidence[]>
   listProviderMemories(): Promise<ProviderMemory[]>
   providerMemoryAction(input: ProviderMemoryActionInput): Promise<ProviderMemory[]>
   getMcpConfiguration(): Promise<McpConfiguration>
   exportDiagnostics(): Promise<DiagnosticResult>
+  getDiagnosticReport(): Promise<string>
   onStream(callback: (message: Message) => void): () => void
   onVaultStatus(callback: (status: VaultStatus) => void): () => void
   onProcessingProgress(callback: (progress: ProcessingProgress) => void): () => void
+  onImportProgress(callback: (progress: ImportProgressView) => void): () => void
+  onStorageProgress(callback: (progress: StorageProgress) => void): () => void
 }

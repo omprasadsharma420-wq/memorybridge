@@ -1,6 +1,6 @@
 {
   "name": "memorybridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Windows-first, local-first universal AI memory layer with cited retrieval and MCP",
   "main": "./out/main/index.js",
@@ -12,6 +12,7 @@
     "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
     "mcp": "node out/main/mcp-server.js",
+    "mcp:smoke": "node scripts/mcp-smoke.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
@@ -21,6 +22,7 @@
     "test:integration": "vitest run --project integration",
     "test:ui": "npm run build && playwright test",
     "test:coverage": "vitest run --coverage",
+    "benchmark:large": "vitest run --config vitest.performance.config.ts --reporter=verbose",
     "package:win": "npm run build && electron-builder --win nsis --x64 --publish never",
     "postinstall": "electron-builder install-app-deps"
   },
@@ -32,7 +34,7 @@
     "zod": "^4.3.5"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "1.61.1",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.14",
@@ -40,9 +42,9 @@
     "@vitejs/plugin-react": "5.2.0",
     "@vitest/coverage-v8": "4.1.10",
     "electron": "43.1.1",
-    "electron-builder": "latest",
+    "electron-builder": "26.15.7",
     "electron-vite": "5.0.0",
-    "eslint": "^9.39.2",
+    "eslint": "^10.8.0",
     "eslint-plugin-react-hooks": "latest",
     "eslint-plugin-react-refresh": "latest",
     "globals": "latest",
@@ -64,6 +66,7 @@
       "output": "release"
     },
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -85,6 +88,8 @@
     "node": ">=22.12"
   },
   "overrides": {
-    "@hono/node-server": "^2.0.5"
+    "@hono/node-server": "^2.0.5",
+    "brace-expansion": "5.0.8",
+    "tar": "^7.5.21"
   }
 }

@@ -33,6 +33,51 @@ describe('OpenAI-compatible provider contracts', () => {
     expect(provider.capabilities()).toMatchObject({ chat: true, streaming: false })
   })
 
+  it('treats authentication, chat, and model listing as independent capabilities', async () => {
+    const base = await fakeServer((request, response) => {
+      if (request.url?.endsWith('/models')) {
+        response.writeHead(404, { 'Content-Type': 'application/json' })
+        response.end(JSON.stringify({ error: { message: 'model listing is unavailable' } }))
+        return
+      }
+      json(response, { choices: [{ message: { content: 'OK' } }] })
+    })
+    const provider = createProvider(base)
+    await expect(provider.testCapability('authentication')).resolves.toMatchObject({ ok: true })
+    expect(provider.capabilities()).toMatchObject({
+      authentication: true,
+      chat: false,
+      modelListing: false
+    })
+    await expect(provider.testCapability('chat')).resolves.toMatchObject({ ok: true })
+    await expect(provider.testCapability('modelListing')).resolves.toMatchObject({ ok: false })
+    expect(provider.capabilities()).toMatchObject({
+      authentication: true,
+      chat: true,
+      modelListing: false
+    })
+
+    const listingOnly = await fakeServer((request, response) => {
+      if (request.url?.endsWith('/models')) {
+        json(response, { data: [{ id: 'chat-only-model' }] })
+        return
+      }
+      response.writeHead(404, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ error: { message: 'embeddings are unavailable' } }))
+    })
+    const listingProvider = createProvider(listingOnly)
+    await expect(listingProvider.testCapability('modelListing')).resolves.toMatchObject({
+      ok: true
+    })
+    await expect(listingProvider.testCapability('embeddings')).resolves.toMatchObject({
+      ok: false
+    })
+    expect(listingProvider.capabilities()).toMatchObject({
+      modelListing: true,
+      embeddings: false
+    })
+  })
+
   it('rejects malformed and prematurely terminated SSE', async () => {
     const malformed = await fakeServer((_request, response) => {
       response.writeHead(200, { 'Content-Type': 'text/event-stream' })

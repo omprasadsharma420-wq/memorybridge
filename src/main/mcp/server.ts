@@ -11,7 +11,26 @@ const scopeShape = {
     .boolean()
     .default(false)
     .describe('Must be explicitly true for cross-project results'),
+  includeNeedsReview: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Include candidate and needs-review memory; never treated as current truth by default'
+    ),
+  includeDisputed: z.boolean().default(false).describe('Include disputed memory'),
+  includeHistorical: z
+    .boolean()
+    .default(false)
+    .describe('Include superseded and rejected historical memory'),
   limit: z.number().int().min(1).max(50).default(10)
+}
+
+const directScopeShape = {
+  projectId: scopeShape.projectId,
+  allProjects: scopeShape.allProjects,
+  includeNeedsReview: scopeShape.includeNeedsReview,
+  includeDisputed: scopeShape.includeDisputed,
+  includeHistorical: scopeShape.includeHistorical
 }
 
 export async function startMcpServer(vaultPath: string): Promise<void> {
@@ -29,7 +48,7 @@ export async function startMcpServer(vaultPath: string): Promise<void> {
 }
 
 export function createMcpServer(query: McpQueryService): McpServer {
-  const server = new McpServer({ name: 'memorybridge', version: '0.2.0' })
+  const server = new McpServer({ name: 'memorybridge', version: '0.2.1' })
 
   server.registerTool(
     'search_memory',
@@ -80,12 +99,13 @@ export function createMcpServer(query: McpQueryService): McpServer {
       description: 'Get a bounded excerpt from one conversation; never dumps a whole vault.',
       inputSchema: {
         chatId: chatIdSchema,
+        ...directScopeShape,
         afterSequence: z.number().int().min(-1).default(-1),
         limit: z.number().int().min(1).max(50).default(20)
       }
     },
-    async ({ chatId, afterSequence, limit }) =>
-      result(query.getChatExcerpt(chatId, afterSequence, limit))
+    async ({ chatId, afterSequence, limit, ...scope }) =>
+      result(query.getChatExcerpt(chatId, scope, afterSequence, limit))
   )
   server.registerTool(
     'get_memory_evidence',
@@ -93,10 +113,12 @@ export function createMcpServer(query: McpQueryService): McpServer {
       description: 'Get exact bounded evidence for one memory.',
       inputSchema: {
         memoryId: memoryIdSchema,
+        chatId: chatIdSchema.optional().describe('Permitted conversation scope'),
+        ...directScopeShape,
         limit: z.number().int().min(1).max(50).default(20)
       }
     },
-    async ({ memoryId, limit }) => result(query.getMemoryEvidence(memoryId, limit))
+    async ({ memoryId, limit, ...scope }) => result(query.getMemoryEvidence(memoryId, scope, limit))
   )
   server.registerTool(
     'list_projects',

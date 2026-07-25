@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
-import { readFile, readdir, rename } from 'node:fs/promises'
-import { basename, extname } from 'node:path'
-import { strFromU8, unzipSync } from 'fflate'
+import { createReadStream } from 'node:fs'
+import { readFile, readdir, rename, stat } from 'node:fs/promises'
+import { basename, extname, isAbsolute } from 'node:path'
+import { AsyncUnzipInflate, strFromU8, Unzip, type UnzipFile } from 'fflate'
 import { createId } from '../../shared/ids'
 import {
   chatSchema,
@@ -18,9 +19,21 @@ import { AppError } from '../errors'
 import { VaultRepository } from '../storage/repository'
 import { VaultManager } from '../storage/vault'
 
-const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
-const MAX_ENTRY_BYTES = 100 * 1024 * 1024
-const MAX_ZIP_ENTRIES = 50_000
+export const IMPORT_LIMITS = {
+  maxArchiveBytes: 512 * 1024 * 1024,
+  maxEntryBytes: 100 * 1024 * 1024,
+  maxTotalDecompressedBytes: 1024 * 1024 * 1024,
+  maxZipEntries: 50_000,
+  maxCompressionRatio: 250
+} as const
+export interface ImportSafetyLimits {
+  maxArchiveBytes: number
+  maxEntryBytes: number
+  maxTotalDecompressedBytes: number
+  maxZipEntries: number
+  maxCompressionRatio: number
+}
+const CONNECTOR_VERSION = 'chatgpt-export@2'
 const SUPPORTED_EXTENSIONS = new Set(['.zip', '.json', '.jsonl', '.md', '.markdown', '.txt'])
 
 interface CanonicalImport {
@@ -38,8 +51,31 @@ interface CanonicalImport {
       | 'other'
     providerRecordId: string | null
     providerUpdatedAt: string | null
+    providerScopeReference: string | null
   }>
   warnings: string[]
+  discoveredConversations: number
+  branchesHandled: number
+  malformedConversations: number
+  skippedEntries: number
+}
+
+export interface ImportProgress {
+  phase: 'reading' | 'decompressing' | 'parsing' | 'persisting' | 'validating' | 'complete'
+  processedBytes: number
+  totalBytes: number
+  completedConversations: number
+  totalConversations: number
+}
+
+export interface ParseOptions {
+  signal?: AbortSignal
+  onProgress?: (progress: ImportProgress) => void
+  limits?: ImportSafetyLimits
+}
+
+interface ImportOptions extends ParseOptions {
+  retainArchive?: boolean
 }
 
 export interface ImportPreview {
@@ -54,11 +90,12 @@ export interface ImportPreview {
 export class ImportService {
   constructor(
     private readonly vault: VaultManager,
-    private readonly repository: VaultRepository
+    private readonly repository: VaultRepository,
+    private readonly limits: ImportSafetyLimits = IMPORT_LIMITS
   ) {}
 
-  async preview(sourcePath: string): Promise<ImportPreview> {
-    const parsed = await parseSource(sourcePath)
+  async preview(sourcePath: string, options: ParseOptions = {}): Promise<ImportPreview> {
+    const parsed = await parseSource(sourcePath, { ...options, limits: this.limits })
     return {
       sourcePath,
       connectorId: parsed.connectorId,
@@ -72,12 +109,12 @@ export class ImportService {
     }
   }
 
-  async import(sourcePath: string): Promise<ImportRecord> {
+  async import(sourcePath: string, options: ImportOptions = {}): Promise<ImportRecord> {
     await this.vault.assertConnected()
-    const bytes = await readFile(sourcePath)
-    if (bytes.byteLength > MAX_ARCHIVE_BYTES)
+    const file = await stat(sourcePath)
+    if (file.size > this.limits.maxArchiveBytes)
       throw new AppError('IMPORT_TOO_LARGE', 'The selected import is larger than 512 MB.')
-    const archiveHash = createHash('sha256').update(bytes).digest('hex')
+    const archiveHash = await hashFile(sourcePath, options)
     const previous = this.repository.findImportByHash(archiveHash)
     const now = new Date().toISOString()
     if (previous?.status === 'complete' || previous?.status === 'unchanged') {
@@ -95,7 +132,7 @@ export class ImportService {
       return unchanged
     }
 
-    const parsed = await parseBytes(sourcePath, bytes)
+    const parsed = await parseSource(sourcePath, { ...options, limits: this.limits })
     const priorCompleted = new Set(
       Array.isArray(previous?.checkpoint.completedIndexes)
         ? previous.checkpoint.completedIndexes.filter(
@@ -103,9 +140,14 @@ export class ImportService {
           )
         : []
     )
+    const conversationKeys = parsed.conversations.map(
+      ({ chat }) => `${chat.source_provider}:${chat.source_conversation_id ?? chat.chat_id}`
+    )
     const record = importRecordSchema.parse({
       import_id: createId('import'),
       connector_id: parsed.connectorId,
+      connector_version:
+        parsed.connectorId === 'chatgpt-export' ? CONNECTOR_VERSION : 'generic-file@1',
       source_path: basename(sourcePath),
       archive_hash: archiveHash,
       status: 'running',
@@ -116,7 +158,16 @@ export class ImportService {
         0
       ),
       review_count: parsed.providerMemories.length + parsed.warnings.length,
-      checkpoint: { nextConversation: 0, completedIndexes: [...priorCompleted], failedIndexes: [] },
+      discovered_count: parsed.discoveredConversations,
+      branches_handled: parsed.branchesHandled,
+      malformed_count: parsed.malformedConversations,
+      skipped_entry_count: parsed.skippedEntries,
+      checkpoint: {
+        nextConversation: 0,
+        completedIndexes: [...priorCompleted],
+        failedIndexes: [],
+        conversationKeys
+      },
       error_messages: [...parsed.warnings]
     })
     await this.repository.saveImportRecord(record)
@@ -127,6 +178,10 @@ export class ImportService {
     const errorMessages = [...parsed.warnings]
     const failedIndexes: number[] = []
     for (let index = 0; index < parsed.conversations.length; index += 1) {
+      if (options.signal?.aborted) {
+        errorMessages.push('Import cancelled by the user. Completed conversations were retained.')
+        break
+      }
       if (priorCompleted.has(index)) {
         skipped += 1
         continue
@@ -148,7 +203,8 @@ export class ImportService {
       record.checkpoint = {
         nextConversation: index + 1,
         completedIndexes: [...priorCompleted],
-        failedIndexes
+        failedIndexes,
+        conversationKeys
       }
       record.imported_count = imported
       record.changed_count = changed
@@ -156,13 +212,21 @@ export class ImportService {
       record.error_count = errors
       record.error_messages = errorMessages.slice(0, 100)
       await this.repository.saveImportRecord(record)
+      options.onProgress?.({
+        phase: 'persisting',
+        processedBytes: file.size,
+        totalBytes: file.size,
+        completedConversations: index + 1,
+        totalConversations: parsed.conversations.length
+      })
     }
+    const cancelled = Boolean(options.signal?.aborted)
     const existingProviderHashes = new Set(
       this.repository
         .listProviderMemories()
         .map((memory) => `${memory.provider}:${memory.content_hash}`)
     )
-    for (const item of parsed.providerMemories) {
+    for (const item of cancelled ? [] : parsed.providerMemories) {
       const contentHash = createHash('sha256').update(item.statement).digest('hex')
       if (existingProviderHashes.has(`chatgpt:${contentHash}`)) continue
       await this.repository.saveProviderMemory(
@@ -173,7 +237,7 @@ export class ImportService {
           source_type: item.sourceType,
           statement: item.statement,
           source_label: item.sourceLabel,
-          scope: { kind: 'global' },
+          scope: providerMemoryScope(item),
           state: 'needs_review',
           user_confirmed: false,
           imported_at: now,
@@ -187,17 +251,30 @@ export class ImportService {
     }
     const completed = importRecordSchema.parse({
       ...record,
-      status: errors ? (imported || changed ? 'partial' : 'failed') : 'complete',
+      status: cancelled
+        ? 'cancelled'
+        : errors
+          ? imported || changed
+            ? 'partial'
+            : 'failed'
+          : 'complete',
       completed_at: new Date().toISOString(),
       imported_count: imported,
       changed_count: changed,
       skipped_count: skipped,
       error_count: errors,
       review_count: parsed.providerMemories.length + parsed.warnings.length,
-      error_category: errors ? 'conversation-import-failed' : null,
+      error_category: cancelled ? 'import-cancelled' : errors ? 'conversation-import-failed' : null,
       error_messages: errorMessages.slice(0, 100)
     })
     await this.repository.saveImportRecord(completed)
+    options.onProgress?.({
+      phase: 'complete',
+      processedBytes: file.size,
+      totalBytes: file.size,
+      completedConversations: parsed.conversations.length,
+      totalConversations: parsed.conversations.length
+    })
     return completed
   }
 
@@ -217,9 +294,7 @@ export class ImportService {
           import_id: createId('import'),
           connector_id: 'unknown',
           source_path: entry.name,
-          archive_hash: createHash('sha256')
-            .update(await readFile(source))
-            .digest('hex'),
+          archive_hash: await hashFile(source),
           status: 'failed',
           started_at: failedAt,
           completed_at: failedAt,
@@ -239,119 +314,425 @@ export class ImportService {
   }
 }
 
-async function parseSource(sourcePath: string): Promise<CanonicalImport> {
-  const bytes = await readFile(sourcePath)
-  if (bytes.byteLength > MAX_ARCHIVE_BYTES)
+async function parseSource(
+  sourcePath: string,
+  options: ParseOptions = {}
+): Promise<CanonicalImport> {
+  throwIfAborted(options.signal)
+  const file = await stat(sourcePath)
+  const limits = options.limits ?? IMPORT_LIMITS
+  if (file.size > limits.maxArchiveBytes)
     throw new AppError('IMPORT_TOO_LARGE', 'The selected import is larger than 512 MB.')
-  return parseBytes(sourcePath, bytes)
-}
-
-async function parseBytes(sourcePath: string, bytes: Uint8Array): Promise<CanonicalImport> {
   const extension = extname(sourcePath).toLowerCase()
   if (!SUPPORTED_EXTENSIONS.has(extension))
     throw new AppError('IMPORT_UNSUPPORTED', 'Choose a ZIP, JSON, JSONL, Markdown, or text file.')
-  if (extension === '.zip') return parseChatGptZip(bytes, sourcePath)
+  if (extension === '.zip') return parseChatGptZip(sourcePath, options)
+  const bytes = await readFile(sourcePath)
+  throwIfAborted(options.signal)
+  options.onProgress?.({
+    phase: 'parsing',
+    processedBytes: bytes.byteLength,
+    totalBytes: file.size,
+    completedConversations: 0,
+    totalConversations: 0
+  })
   return parseGeneric(strFromU8(bytes), extension, sourcePath)
 }
 
-function parseChatGptZip(bytes: Uint8Array, sourcePath: string): CanonicalImport {
-  let files: Record<string, Uint8Array>
-  try {
-    files = unzipSync(bytes, {
-      filter: (file) => file.originalSize <= MAX_ENTRY_BYTES
-    })
-  } catch {
-    throw new AppError('IMPORT_MALFORMED_ZIP', 'The ChatGPT export ZIP could not be read.')
-  }
-  const names = Object.keys(files)
-  if (names.length > MAX_ZIP_ENTRIES)
-    throw new AppError('IMPORT_TOO_MANY_FILES', 'The ZIP contains too many files to import safely.')
-  const conversationsName = names.find((name) => /(^|\/)conversations\.json$/i.test(name))
-  if (!conversationsName)
+async function parseChatGptZip(
+  sourcePath: string,
+  options: ParseOptions
+): Promise<CanonicalImport> {
+  const entries = await readSelectedZipEntries(sourcePath, options)
+  const conversations = entries.get('conversations.json')
+  if (!conversations)
     throw new AppError('IMPORT_CHATGPT_MISSING', 'The ZIP does not contain conversations.json.')
   let raw: unknown
   try {
-    raw = JSON.parse(strFromU8(files[conversationsName]!))
+    raw = JSON.parse(strFromU8(conversations))
   } catch {
     throw new AppError('IMPORT_MALFORMED_JSON', 'conversations.json is not valid JSON.')
   }
   if (!Array.isArray(raw))
     throw new AppError('IMPORT_INVALID_SHAPE', 'conversations.json must contain an array.')
   const warnings: string[] = []
-  const conversations = raw.flatMap((value, index) => {
+  let branchesHandled = 0
+  let malformedConversations = 0
+  const canonicalConversations = raw.flatMap((value, index) => {
     try {
-      return [canonicalizeChatGptConversation(asRecord(value), sourcePath, index)]
-    } catch {
-      warnings.push(`Conversation ${index + 1} was malformed and skipped.`)
+      const result = canonicalizeChatGptConversation(asRecord(value), sourcePath, index)
+      warnings.push(...result.warnings)
+      branchesHandled += result.branchesHandled
+      return result.conversations
+    } catch (error) {
+      malformedConversations += 1
+      warnings.push(
+        `Conversation ${index + 1} was malformed and skipped (${safeImportMessage(error)}).`
+      )
       return []
     }
   })
-  const memoriesName = names.find((name) => /(^|\/)memories\.json$/i.test(name))
-  const providerMemories = memoriesName ? parseProviderMemories(files[memoriesName]!) : []
-  return { connectorId: 'chatgpt-export', conversations, providerMemories, warnings }
+  const memories = entries.get('memories.json')
+  const providerMemories = memories ? parseProviderMemories(memories) : []
+  options.onProgress?.({
+    phase: 'parsing',
+    processedBytes: (await stat(sourcePath)).size,
+    totalBytes: (await stat(sourcePath)).size,
+    completedConversations: canonicalConversations.length,
+    totalConversations: raw.length
+  })
+  return {
+    connectorId: 'chatgpt-export',
+    conversations: canonicalConversations,
+    providerMemories,
+    warnings,
+    discoveredConversations: raw.length,
+    branchesHandled,
+    malformedConversations,
+    skippedEntries: 0
+  }
+}
+
+async function readSelectedZipEntries(
+  sourcePath: string,
+  options: ParseOptions
+): Promise<Map<'conversations.json' | 'memories.json', Uint8Array>> {
+  const file = await stat(sourcePath)
+  const limits = options.limits ?? IMPORT_LIMITS
+  const selected = new Map<'conversations.json' | 'memories.json', Uint8Array>()
+  const activeFiles = new Set<UnzipFile>()
+  let entryCount = 0
+  let declaredTotal = 0
+  let processedBytes = 0
+  let pendingSelected = 0
+  let inputComplete = false
+  let settled = false
+  let resolveCompletion!: () => void
+  let rejectCompletion!: (error: unknown) => void
+  const completion = new Promise<void>((resolve, reject) => {
+    resolveCompletion = resolve
+    rejectCompletion = reject
+  })
+  // ZIP callbacks can reject before the stream loop reaches its first await.
+  // Attach a handler immediately so Node does not report a transient
+  // unhandled rejection; callers still receive the original rejection below.
+  void completion.catch(() => undefined)
+  const finishIfReady = (): void => {
+    if (!settled && inputComplete && pendingSelected === 0) {
+      settled = true
+      resolveCompletion()
+    }
+  }
+  const fail = (error: unknown): void => {
+    if (settled) return
+    settled = true
+    for (const active of activeFiles) active.terminate()
+    rejectCompletion(error)
+  }
+  const unzip = new Unzip((entry) => {
+    try {
+      throwIfAborted(options.signal)
+      entryCount += 1
+      if (entryCount > limits.maxZipEntries) {
+        throw new AppError(
+          'IMPORT_TOO_MANY_FILES',
+          'The ZIP contains too many files to import safely.'
+        )
+      }
+      const normalizedName = normalizeZipEntryName(entry.name)
+      if (entry.originalSize !== undefined) {
+        if (entry.originalSize > limits.maxEntryBytes) {
+          throw new AppError(
+            'IMPORT_ENTRY_TOO_LARGE',
+            `ZIP entry ${basename(normalizedName)} exceeds the 100 MB safety limit.`
+          )
+        }
+        declaredTotal += entry.originalSize
+        if (declaredTotal > limits.maxTotalDecompressedBytes) {
+          throw new AppError(
+            'IMPORT_EXPANSION_LIMIT',
+            'The ZIP expands beyond the 1 GB cumulative safety limit.'
+          )
+        }
+        if (
+          entry.size &&
+          entry.originalSize / Math.max(1, entry.size) > limits.maxCompressionRatio
+        ) {
+          throw new AppError(
+            'IMPORT_COMPRESSION_RATIO',
+            `ZIP entry ${basename(normalizedName)} has an unsafe compression ratio.`
+          )
+        }
+      }
+      const match = /(^|\/)(conversations|memories)\.json$/i.exec(normalizedName)
+      if (!match) return
+      const key = `${match[2]!.toLowerCase()}.json` as 'conversations.json' | 'memories.json'
+      if (selected.has(key)) return
+      pendingSelected += 1
+      activeFiles.add(entry)
+      const chunks: Uint8Array[] = []
+      let expanded = 0
+      entry.ondata = (error, chunk, final) => {
+        if (error) {
+          fail(new AppError('IMPORT_MALFORMED_ZIP', 'The ChatGPT export ZIP could not be read.'))
+          return
+        }
+        try {
+          throwIfAborted(options.signal)
+          expanded += chunk.byteLength
+          if (expanded > limits.maxEntryBytes)
+            throw new AppError(
+              'IMPORT_ENTRY_TOO_LARGE',
+              `ZIP entry ${basename(normalizedName)} exceeds the 100 MB safety limit.`
+            )
+          if (chunk.byteLength) chunks.push(chunk)
+          if (!final) return
+          const output = new Uint8Array(expanded)
+          let offset = 0
+          for (const value of chunks) {
+            output.set(value, offset)
+            offset += value.byteLength
+          }
+          selected.set(key, output)
+          activeFiles.delete(entry)
+          pendingSelected -= 1
+          finishIfReady()
+        } catch (entryError) {
+          fail(entryError)
+        }
+      }
+      entry.start()
+    } catch (error) {
+      fail(error)
+    }
+  })
+  unzip.register(AsyncUnzipInflate)
+  const stream = createReadStream(sourcePath, { highWaterMark: 256 * 1024 })
+  const abort = (): void => {
+    stream.destroy(new Error('IMPORT_CANCELLED'))
+  }
+  options.signal?.addEventListener('abort', abort, { once: true })
+  try {
+    for await (const rawChunk of stream) {
+      throwIfAborted(options.signal)
+      if (settled) await completion
+      const chunk = rawChunk instanceof Uint8Array ? rawChunk : new Uint8Array(rawChunk)
+      processedBytes += chunk.byteLength
+      unzip.push(chunk, false)
+      options.onProgress?.({
+        phase: 'decompressing',
+        processedBytes,
+        totalBytes: file.size,
+        completedConversations: 0,
+        totalConversations: 0
+      })
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    inputComplete = true
+    unzip.push(new Uint8Array(), true)
+    finishIfReady()
+    await completion
+    if (entryCount === 0)
+      throw new AppError('IMPORT_MALFORMED_ZIP', 'The ChatGPT export ZIP could not be read.')
+  } catch (error) {
+    const mapped = options.signal?.aborted
+      ? new AppError('IMPORT_CANCELLED', 'The import was cancelled safely.', true)
+      : error instanceof AppError
+        ? error
+        : new AppError('IMPORT_MALFORMED_ZIP', 'The ChatGPT export ZIP could not be read.')
+    fail(mapped)
+    await completion.catch(() => undefined)
+    throw mapped
+  } finally {
+    options.signal?.removeEventListener('abort', abort)
+    for (const active of activeFiles) active.terminate()
+  }
+  return selected
+}
+
+function normalizeZipEntryName(name: string): string {
+  const normalized = name.replaceAll('\\', '/')
+  const parts = normalized.split('/')
+  if (
+    !normalized ||
+    isAbsolute(normalized) ||
+    /^[a-z]:/i.test(normalized) ||
+    parts.some((part) => part === '..' || part.includes('\0'))
+  ) {
+    throw new AppError('IMPORT_UNSAFE_PATH', 'The ZIP contains an unsafe entry path.')
+  }
+  return parts.filter((part) => part && part !== '.').join('/')
+}
+
+function resolveBranchPath(
+  nodes: Map<
+    string,
+    {
+      nodeId: string
+      node: Record<string, unknown>
+      parentId: string | null
+      children: string[]
+    }
+  >,
+  leafId: string
+): { leafId: string; nodeIds: string[]; issue: string | null } {
+  const reverse: string[] = []
+  const visited = new Set<string>()
+  let current: string | null = leafId
+  let issue: string | null = null
+  while (current) {
+    if (visited.has(current)) {
+      issue = 'A parent cycle was detected; only the coherent suffix was retained for review.'
+      break
+    }
+    visited.add(current)
+    const node = nodes.get(current)
+    if (!node) {
+      issue = 'A parent link was missing; only the coherent suffix was retained for review.'
+      break
+    }
+    reverse.push(current)
+    if (node.parentId && !nodes.has(node.parentId)) {
+      issue = 'A parent link was malformed; only the coherent suffix was retained for review.'
+      break
+    }
+    current = node.parentId
+  }
+  return { leafId, nodeIds: reverse.reverse(), issue }
+}
+
+function hasMessage(node: Record<string, unknown> | undefined): boolean {
+  return Boolean(node && Object.keys(asRecord(node.message)).length)
 }
 
 function canonicalizeChatGptConversation(
   value: Record<string, unknown>,
   sourcePath: string,
   index: number
-): { chat: Chat; messages: Message[] } {
+): {
+  conversations: Array<{ chat: Chat; messages: Message[] }>
+  warnings: string[]
+  branchesHandled: number
+} {
   const providerId = stringValue(value.id) ?? `archive-${index}`
   const title = stringValue(value.title) ?? 'Imported ChatGPT conversation'
   const mapping = asRecord(value.mapping)
-  const nodes = Object.entries(mapping)
-    .map(([nodeId, raw]) => ({ nodeId, node: asRecord(raw) }))
-    .filter(({ node }) => Object.keys(asRecord(node.message)).length > 0)
+  const nodes = new Map(
+    Object.entries(mapping).map(([nodeId, raw]) => {
+      const node = asRecord(raw)
+      return [
+        nodeId,
+        {
+          nodeId,
+          node,
+          parentId: stringValue(node.parent),
+          children: Array.isArray(node.children)
+            ? node.children.filter((child): child is string => typeof child === 'string')
+            : []
+        }
+      ] as const
+    })
+  )
+  if (nodes.size === 0) throw new Error('Conversation mapping is empty.')
+  const currentNode = stringValue(value.current_node)
+  const leaves = [...nodes.values()]
+    .filter(({ nodeId }) => ![...nodes.values()].some((node) => node.parentId === nodeId))
+    .map(({ nodeId }) => nodeId)
+  const requestedLeaves = currentNode && nodes.has(currentNode) ? [currentNode] : leaves
+  const resolved = requestedLeaves
+    .slice(0, 100)
+    .map((leaf) => resolveBranchPath(nodes, leaf))
+    .filter((branch) => branch.nodeIds.some((nodeId) => hasMessage(nodes.get(nodeId)?.node)))
+  if (resolved.length === 0) throw new Error('Conversation has no coherent supported branch.')
+  const unresolved = !currentNode || !nodes.has(currentNode)
+  const warnings: string[] = []
+  if (unresolved) {
+    warnings.push(
+      `Conversation ${index + 1} had no resolvable current node; ${resolved.length} coherent branch path(s) were imported separately for review.`
+    )
+  }
+  for (const branch of resolved) {
+    if (branch.issue)
+      warnings.push(`Conversation ${index + 1}, branch ${branch.leafId}: ${branch.issue}`)
+  }
   const createdFallback = toIso(value.create_time)
-  const chatId = createId('chat')
-  const messages = nodes
-    .map(({ nodeId, node }, ordinal) =>
-      canonicalizeChatGptMessage(chatId, nodeId, node, ordinal, createdFallback)
-    )
-    .filter((message): message is Message => Boolean(message))
-    .sort(
-      (left, right) =>
-        left.created_at.localeCompare(right.created_at) || left.sequence - right.sequence
-    )
-    .map((message, sequence) => ({ ...message, sequence }))
-  if (messages.length === 0) throw new Error('Conversation has no supported messages.')
-  const createdAt = messages[0]?.created_at ?? createdFallback
-  const updatedAt = messages.at(-1)?.updated_at ?? toIso(value.update_time, createdAt)
-  const contentHash = createHash('sha256')
-    .update(
-      messages.map((message) => `${message.provider_message_id}:${message.content_hash}`).join('|')
-    )
-    .digest('hex')
-  const chat = chatSchema.parse({
-    chat_id: chatId,
-    project_id: null,
-    title,
-    slug: slugify(title, 'chat'),
-    created_at: createdAt,
-    updated_at: updatedAt,
-    source_provider: 'chatgpt',
-    source_conversation_id: providerId,
-    original_title: title,
-    model_ids: [
-      ...new Set(messages.map((message) => message.model).filter((model) => model !== 'unknown'))
-    ],
-    branch_count: countBranches(nodes.map(({ node }) => node)),
-    attachment_count: messages.reduce(
-      (sum, message) => sum + (message.attachments?.length ?? 0),
-      0
-    ),
-    citation_count: messages.reduce((sum, message) => sum + (message.citations?.length ?? 0), 0),
-    sync_state: 'imported',
-    processing_state: 'unprocessed',
-    import_origin: basename(sourcePath),
-    content_hash: contentHash,
-    raw_metadata: boundedMetadata(value, ['conversation_template_id', 'gizmo_id', 'is_archived'])
+  const conversations = resolved.flatMap((branch, branchIndex) => {
+    const sourceConversationId =
+      resolved.length === 1 && !unresolved ? providerId : `${providerId}::branch:${branch.leafId}`
+    const chatId = stableId('chat', `chatgpt:${sourceConversationId}`)
+    const messages = branch.nodeIds
+      .map((nodeId, ordinal) => {
+        const node = nodes.get(nodeId)
+        return node
+          ? canonicalizeChatGptMessage(
+              chatId,
+              sourceConversationId,
+              branch.leafId,
+              nodeId,
+              node.node,
+              ordinal,
+              createdFallback
+            )
+          : null
+      })
+      .filter((message): message is Message => Boolean(message))
+      .map((message, sequence) => ({ ...message, sequence }))
+    if (messages.length === 0) return []
+    const createdAt = messages[0]?.created_at ?? createdFallback
+    const updatedAt = messages.at(-1)?.updated_at ?? toIso(value.update_time, createdAt)
+    const contentHash = createHash('sha256')
+      .update(
+        messages
+          .map((message) => `${message.provider_message_id}:${message.content_hash}`)
+          .join('|')
+      )
+      .digest('hex')
+    const branchTitle = resolved.length > 1 ? `${title} (branch ${branchIndex + 1})` : title
+    const chat = chatSchema.parse({
+      chat_id: chatId,
+      project_id: null,
+      title: branchTitle,
+      slug: slugify(branchTitle, 'chat'),
+      created_at: createdAt,
+      updated_at: updatedAt,
+      source_provider: 'chatgpt',
+      source_conversation_id: sourceConversationId,
+      original_title: title,
+      model_ids: [
+        ...new Set(messages.map((message) => message.model).filter((model) => model !== 'unknown'))
+      ],
+      branch_count: Math.max(1, leaves.length),
+      attachment_count: messages.reduce(
+        (sum, message) => sum + (message.attachments?.length ?? 0),
+        0
+      ),
+      citation_count: messages.reduce((sum, message) => sum + (message.citations?.length ?? 0), 0),
+      sync_state: 'imported',
+      processing_state: unresolved || branch.issue ? 'needs_review' : 'unprocessed',
+      import_origin: basename(sourcePath),
+      content_hash: contentHash,
+      raw_metadata: {
+        ...boundedMetadata(value, ['conversation_template_id', 'gizmo_id', 'is_archived']),
+        branch_resolution: unresolved ? 'separate_coherent_paths' : 'active_path',
+        branch_leaf_id: branch.leafId,
+        branch_path_node_ids: branch.nodeIds.slice(0, 500),
+        branch_review_required: Boolean(unresolved || branch.issue),
+        connector_version: CONNECTOR_VERSION
+      }
+    })
+    return [{ chat, messages }]
   })
-  return { chat, messages }
+  return {
+    conversations,
+    warnings,
+    branchesHandled: Math.max(0, conversations.length - 1) + (currentNode ? 1 : 0)
+  }
 }
 
 function canonicalizeChatGptMessage(
   chatId: string,
+  sourceConversationId: string,
+  branchId: string,
   nodeId: string,
   node: Record<string, unknown>,
   ordinal: number,
@@ -368,7 +749,7 @@ function canonicalizeChatGptMessage(
   const createdAt = toIso(raw.create_time, fallback)
   const model = stringValue(asRecord(raw.metadata).model_slug) ?? 'unknown'
   return messageSchema.parse({
-    message_id: createId('msg'),
+    message_id: stableId('msg', `chatgpt:${sourceConversationId}:${stringValue(raw.id) ?? nodeId}`),
     chat_id: chatId,
     role,
     content: text,
@@ -380,7 +761,7 @@ function canonicalizeChatGptMessage(
     sequence: ordinal,
     provider_message_id: stringValue(raw.id) ?? nodeId,
     parent_message_id: stringValue(node.parent),
-    branch_id: nodeId,
+    branch_id: branchId,
     content_blocks: parts.map((part) => ({ type: typeof part, value: boundedValue(part) })),
     attachments: arrayRecords(asRecord(raw.metadata).attachments),
     citations: arrayRecords(asRecord(raw.metadata).citations),
@@ -395,7 +776,11 @@ function parseGeneric(text: string, extension: string, sourcePath: string): Cano
       connectorId: 'generic-file',
       conversations: [textConversation(text, sourcePath)],
       providerMemories: [],
-      warnings: []
+      warnings: [],
+      discoveredConversations: 1,
+      branchesHandled: 0,
+      malformedConversations: 0,
+      skippedEntries: 0
     }
   }
   let values: unknown[]
@@ -426,7 +811,16 @@ function parseGeneric(text: string, extension: string, sourcePath: string): Cano
       return []
     }
   })
-  return { connectorId: 'generic-file', conversations, providerMemories: [], warnings }
+  return {
+    connectorId: 'generic-file',
+    conversations,
+    providerMemories: [],
+    warnings,
+    discoveredConversations: rawConversations.length,
+    branchesHandled: 0,
+    malformedConversations: rawConversations.length - conversations.length,
+    skippedEntries: rawConversations.length - conversations.length
+  }
 }
 
 function canonicalizeGenericConversation(
@@ -436,7 +830,9 @@ function canonicalizeGenericConversation(
 ): { chat: Chat; messages: Message[] } {
   const values = Array.isArray(value.messages) ? value.messages : []
   if (!values.length) throw new Error('No messages')
-  const chatId = createId('chat')
+  const providerId = stringValue(value.id) ?? `${basename(sourcePath)}:${index}`
+  const sourceProvider = stringValue(value.provider) ?? 'generic'
+  const chatId = stableId('chat', `${sourceProvider}:${providerId}`)
   const title =
     stringValue(value.title) ??
     deterministicTitle(stringValue(asRecord(values[0]).content) ?? basename(sourcePath))
@@ -447,7 +843,10 @@ function canonicalizeGenericConversation(
     const content = stringValue(item.content) ?? JSON.stringify(item)
     const createdAt = toIso(item.created_at ?? item.timestamp)
     return messageSchema.parse({
-      message_id: createId('msg'),
+      message_id: stableId(
+        'msg',
+        `${sourceProvider}:${providerId}:${stringValue(item.id) ?? sequence}`
+      ),
       chat_id: chatId,
       role,
       content,
@@ -462,7 +861,6 @@ function canonicalizeGenericConversation(
       content_hash: createHash('sha256').update(content).digest('hex')
     })
   })
-  const providerId = stringValue(value.id) ?? `${basename(sourcePath)}:${index}`
   return {
     chat: chatSchema.parse({
       chat_id: chatId,
@@ -471,7 +869,7 @@ function canonicalizeGenericConversation(
       slug: slugify(title, 'chat'),
       created_at: messages[0]!.created_at,
       updated_at: messages.at(-1)!.updated_at,
-      source_provider: stringValue(value.provider) ?? 'generic',
+      source_provider: sourceProvider,
       source_conversation_id: providerId,
       original_title: title,
       sync_state: 'imported',
@@ -510,7 +908,12 @@ function parseProviderMemories(bytes: Uint8Array): CanonicalImport['providerMemo
               sourceLabel: `ChatGPT export memory ${index + 1}`,
               sourceType,
               providerRecordId: stringValue(item.id),
-              providerUpdatedAt: nullableIso(item.updated_at ?? item.update_time)
+              providerUpdatedAt: nullableIso(item.updated_at ?? item.update_time),
+              providerScopeReference:
+                stringValue(item.project_id) ??
+                stringValue(item.workspace_id) ??
+                stringValue(item.conversation_id) ??
+                stringValue(item.source)
             }
           ]
         : []
@@ -533,6 +936,24 @@ function providerMemorySourceType(
   return 'other'
 }
 
+function providerMemoryScope(item: CanonicalImport['providerMemories'][number]):
+  | { kind: 'global' }
+  | {
+      kind: 'provider'
+      level: 'project' | 'workspace' | 'conversation' | 'unknown'
+      reference: string | null
+    } {
+  if (item.sourceType === 'provider_saved_memory' || item.sourceType === 'custom_instruction')
+    return { kind: 'global' }
+  if (item.sourceType === 'project_instruction')
+    return { kind: 'provider', level: 'project', reference: item.providerScopeReference }
+  if (item.sourceType === 'workspace_instruction')
+    return { kind: 'provider', level: 'workspace', reference: item.providerScopeReference }
+  if (item.sourceType === 'provider_summary')
+    return { kind: 'provider', level: 'conversation', reference: item.providerScopeReference }
+  return { kind: 'provider', level: 'unknown', reference: item.providerScopeReference }
+}
+
 function nullableIso(value: unknown): string | null {
   if (value === null || value === undefined) return null
   const parsed = toIso(value, '')
@@ -542,6 +963,48 @@ function nullableIso(value: unknown): string | null {
 function safeImportMessage(error: unknown): string {
   if (error instanceof Error) return error.message.replace(/[\r\n]+/g, ' ').slice(0, 1000)
   return 'Unknown import failure.'
+}
+
+async function hashFile(sourcePath: string, options: ParseOptions = {}): Promise<string> {
+  const file = await stat(sourcePath)
+  const hash = createHash('sha256')
+  let processedBytes = 0
+  const stream = createReadStream(sourcePath, { highWaterMark: 1024 * 1024 })
+  const abort = (): void => {
+    stream.destroy(new Error('IMPORT_CANCELLED'))
+  }
+  options.signal?.addEventListener('abort', abort, { once: true })
+  try {
+    for await (const chunk of stream) {
+      throwIfAborted(options.signal)
+      const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
+      processedBytes += bytes.byteLength
+      hash.update(bytes)
+      options.onProgress?.({
+        phase: 'reading',
+        processedBytes,
+        totalBytes: file.size,
+        completedConversations: 0,
+        totalConversations: 0
+      })
+    }
+    return hash.digest('hex')
+  } catch (error) {
+    if (options.signal?.aborted)
+      throw new AppError('IMPORT_CANCELLED', 'The import was cancelled safely.', true)
+    throw error
+  } finally {
+    options.signal?.removeEventListener('abort', abort)
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted)
+    throw new AppError('IMPORT_CANCELLED', 'The import was cancelled safely.', true)
+}
+
+function stableId(prefix: 'chat' | 'msg', seed: string): string {
+  return `${prefix}_${createHash('sha256').update(seed).digest('hex').slice(0, 32)}`
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -566,16 +1029,6 @@ function toIso(value?: unknown, fallback = new Date().toISOString()): string {
 }
 function arrayRecords(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? value.map(asRecord).slice(0, 100) : []
-}
-function countBranches(nodes: Record<string, unknown>[]): number {
-  return Math.max(
-    1,
-    nodes.reduce(
-      (sum, node) =>
-        sum + Math.max(0, (Array.isArray(node.children) ? node.children.length : 0) - 1),
-      1
-    )
-  )
 }
 function boundedMetadata(value: Record<string, unknown>, keys: string[]): Record<string, unknown> {
   return Object.fromEntries(

@@ -1,9 +1,10 @@
-import { toJSONSchema } from 'zod'
+import { toJSONSchema, z } from 'zod'
 import { redactSecrets } from '../../shared/security'
 import { AppError } from '../errors'
 import type {
   AIProvider,
   ChatRequest,
+  ProviderCapability,
   ProviderCapabilities,
   ProviderHealth,
   StructuredGenerationRequest
@@ -14,11 +15,16 @@ interface ProviderOptions {
   apiKey: string
   timeoutMs: number
   maxRetries: number
+  chatModel?: string
+  extractionModel?: string
+  embeddingModel?: string
+  initialCapabilities?: Partial<ProviderCapabilities>
 }
 
 export class OpenAICompatibleProvider implements AIProvider {
   readonly id = 'openai-compatible'
   private detected: ProviderCapabilities = {
+    authentication: false,
     chat: false,
     streaming: false,
     structuredOutput: false,
@@ -27,7 +33,9 @@ export class OpenAICompatibleProvider implements AIProvider {
     cancellation: true
   }
 
-  constructor(private readonly options: ProviderOptions) {}
+  constructor(private readonly options: ProviderOptions) {
+    this.detected = { ...this.detected, ...options.initialCapabilities }
+  }
 
   capabilities(): ProviderCapabilities {
     return { ...this.detected }
@@ -201,14 +209,91 @@ export class OpenAICompatibleProvider implements AIProvider {
   }
 
   async validateConfiguration(): Promise<ProviderHealth> {
+    return this.testCapability('authentication')
+  }
+
+  async testCapability(
+    capability: ProviderCapability,
+    signal?: AbortSignal
+  ): Promise<ProviderHealth> {
     try {
-      await this.listModels()
-      return { ok: true, message: 'Provider connection succeeded.' }
+      if (capability === 'authentication') {
+        await this.probeAuthentication(signal)
+      } else if (capability === 'chat' || capability === 'streaming') {
+        let content = ''
+        for await (const chunk of this.streamChat({
+          model: this.options.chatModel ?? 'test-model',
+          messages: [{ role: 'user', content: 'Reply with OK.' }],
+          maxOutputTokens: 8,
+          signal
+        }))
+          content += chunk
+        if (!content.trim())
+          throw new AppError('PROVIDER_INVALID_OUTPUT', 'The provider returned no chat content.')
+        if (capability === 'streaming' && !this.detected.streaming)
+          throw new AppError(
+            'PROVIDER_STREAMING_UNSUPPORTED',
+            'Chat works, but this endpoint returned a non-streaming response.'
+          )
+      } else if (capability === 'structuredOutput') {
+        await this.generateStructured({
+          model: this.options.extractionModel ?? this.options.chatModel ?? 'test-model',
+          messages: [
+            {
+              role: 'user',
+              content: 'Return JSON with the boolean field "ok" set to true.'
+            }
+          ],
+          schema: z.object({ ok: z.literal(true) }),
+          schemaName: 'memorybridge_capability_probe',
+          signal
+        })
+      } else if (capability === 'embeddings') {
+        await this.embed(
+          ['MemoryBridge capability test'],
+          this.options.embeddingModel ?? 'test-embedding-model',
+          signal
+        )
+      } else if (capability === 'modelListing') {
+        await this.listModels(signal)
+      } else {
+        this.detected = { ...this.detected, cancellation: true }
+      }
+      return { ok: true, message: `${humanCapability(capability)} is available.` }
     } catch (error) {
       return {
         ok: false,
         message:
           error instanceof Error ? redactSecrets(error.message) : 'Provider connection failed.'
+      }
+    }
+  }
+
+  private async probeAuthentication(signal?: AbortSignal): Promise<void> {
+    if (!this.options.apiKey)
+      throw new AppError('API_KEY_MISSING', 'No provider API key is stored.')
+    const timeout = AbortSignal.timeout(this.options.timeoutMs)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
+    const response = await fetch(`${this.options.apiBaseUrl.replace(/\/$/, '')}/models`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${this.options.apiKey}` },
+      signal: combinedSignal
+    })
+    if (response.status === 401 || response.status === 403)
+      throw new AppError('PROVIDER_AUTHENTICATION', 'The provider rejected the API key.')
+    if (response.status === 429 || response.status >= 500)
+      throw new AppError(
+        `PROVIDER_HTTP_${response.status}`,
+        `Provider connectivity check failed with status ${response.status}.`,
+        true
+      )
+    this.detected = { ...this.detected, authentication: true }
+    if (response.ok) {
+      try {
+        const body = (await response.json()) as { data?: unknown }
+        if (Array.isArray(body.data)) this.detected = { ...this.detected, modelListing: true }
+      } catch {
+        // Authentication/connectivity can succeed even when model listing is not JSON-compatible.
       }
     }
   }
@@ -234,7 +319,10 @@ export class OpenAICompatibleProvider implements AIProvider {
           },
           signal
         })
-        if (response.ok) return response
+        if (response.ok) {
+          this.detected = { ...this.detected, authentication: true }
+          return response
+        }
         const retryable = response.status === 429 || response.status >= 500
         if (!retryable || attempt === this.options.maxRetries) {
           const detail = await safeResponseError(response)
@@ -307,4 +395,10 @@ function extractMessageContent(value: Record<string, unknown>): string | null {
   if (!Array.isArray(choices)) return null
   const first = choices[0] as { message?: { content?: unknown } } | undefined
   return typeof first?.message?.content === 'string' ? first.message.content : null
+}
+
+function humanCapability(capability: ProviderCapability): string {
+  return capability
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/^./, (character) => character.toUpperCase())
 }

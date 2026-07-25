@@ -1,6 +1,7 @@
 import type {
   AIProvider,
   ChatRequest,
+  ProviderCapability,
   ProviderHealth,
   ProviderCapabilities,
   StructuredGenerationRequest
@@ -29,6 +30,7 @@ export class MockProvider implements AIProvider {
 
   capabilities(): ProviderCapabilities {
     return {
+      authentication: true,
       chat: true,
       streaming: true,
       structuredOutput: true,
@@ -86,6 +88,13 @@ export class MockProvider implements AIProvider {
 
   async validateConfiguration(): Promise<ProviderHealth> {
     return { ok: true, message: 'Mock provider is ready. No credential or network is required.' }
+  }
+
+  async testCapability(capability: ProviderCapability): Promise<ProviderHealth> {
+    return {
+      ok: true,
+      message: `Demo provider ${capability} is available for deterministic synthetic testing.`
+    }
   }
 
   async listModels(): Promise<string[]> {
